@@ -72,13 +72,11 @@ func main() {
 	}
 	log.Printf("[btcprice] spot=%.2f", spot)
 
-	// Discover markets and populate metadata in one step.
-	log.Printf("[discover] searching BTC markets expiring within %s...", *discoverWindow)
-	cfg.MarketTokenIDs = discoverAndLoadMeta(gammaClient, spot, *discoverWindow)
+	// Discover the current 5-minute BTC market pair.
+	cfg.MarketTokenIDs = discoverAndLoadMeta(gammaClient, spot)
 	if len(cfg.MarketTokenIDs) == 0 {
-		log.Fatalf("[discover] no active BTC markets found within %s", *discoverWindow)
+		log.Fatal("[discover] no active BTC 5m market found")
 	}
-	log.Printf("[discover] tracking %d token(s)", len(cfg.MarketTokenIDs))
 
 	// CSV logger
 	csvWriter, err := csvlog.NewWriter(cfg.CSVDir)
@@ -136,8 +134,8 @@ func main() {
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
-	// Periodically re-discover to pick up new windows as old ones expire.
-	rediscoverTicker := time.NewTicker(*discoverWindow / 2)
+	// Re-discover every 5 minutes to switch to the next window.
+	rediscoverTicker := time.NewTicker(5 * time.Minute)
 	defer rediscoverTicker.Stop()
 
 	for {
@@ -148,10 +146,9 @@ func main() {
 
 		case <-rediscoverTicker.C:
 			currentSpot := priceFeed.Price()
-			newIDs := discoverAndLoadMeta(gammaClient, currentSpot, *discoverWindow)
+			newIDs := discoverAndLoadMeta(gammaClient, currentSpot)
 			if len(newIDs) > 0 {
 				cfg.MarketTokenIDs = newIDs
-				log.Printf("[discover] refreshed — %d token(s)", len(newIDs))
 			}
 
 		case <-ticker.C:
@@ -184,41 +181,39 @@ type tokenMeta struct {
 	Expiry   time.Time
 }
 
-// discoverAndLoadMeta discovers active BTC markets via Gamma API,
-// populates marketMeta for each token, and returns the list of Up token IDs.
-// spot is used as the ATM strike for each discovered market.
-func discoverAndLoadMeta(gc *gamma.Client, spot float64, window time.Duration) []string {
-	markets, err := gc.DiscoverBTC(window)
+// discoverAndLoadMeta fetches the current 5-minute BTC market pair,
+// populates marketMeta, and returns [upTokenID, downTokenID].
+// spot is recorded as the ATM strike (BTC price at window open).
+func discoverAndLoadMeta(gc *gamma.Client, spot float64) []string {
+	m, err := gc.Current5m()
 	if err != nil {
 		log.Printf("[discover] gamma error: %v", err)
 		return nil
 	}
-
-	var ids []string
-	for _, m := range markets {
-		// Track both Up and Down tokens.
-		for _, entry := range []struct {
-			tokenID string
-			outcome string
-		}{
-			{m.UpTokenID, "Up"},
-			{m.DownTokenID, "Down"},
-		} {
-			if entry.tokenID == "" {
-				continue
-			}
-			marketMeta[entry.tokenID] = tokenMeta{
-				MarketID: m.ConditionID,
-				Outcome:  entry.outcome,
-				Strike:   spot,
-				Expiry:   m.EndDate,
-			}
-			ids = append(ids, entry.tokenID)
-		}
-		log.Printf("[meta] %.8s…  expiry=%s | %s",
-			m.UpTokenID, m.EndDate.Format("15:04:05Z"), m.Question)
+	if m == nil {
+		log.Println("[discover] current 5m market not found")
+		return nil
 	}
-	return ids
+
+	for _, entry := range []struct {
+		tokenID string
+		outcome string
+	}{
+		{m.UpTokenID, "Up"},
+		{m.DownTokenID, "Down"},
+	} {
+		marketMeta[entry.tokenID] = tokenMeta{
+			MarketID: m.ConditionID,
+			Outcome:  entry.outcome,
+			Strike:   spot,
+			Expiry:   m.EndDate,
+		}
+	}
+
+	log.Printf("[discover] %s  exp=%s  K=%.2f",
+		m.Question, m.EndDate.Format("15:04:05Z"), spot)
+
+	return []string{m.UpTokenID, m.DownTokenID}
 }
 
 // ── poll loop ─────────────────────────────────────────────────────────────────

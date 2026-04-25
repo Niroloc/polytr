@@ -28,17 +28,50 @@ func NewClient() *Client {
 	return &Client{http: &http.Client{Timeout: 8 * time.Second}}
 }
 
+// Current5m returns the active BTC Up/Down 5-minute market for the current window.
+// If the current window isn't live yet, tries the next one.
+// Returns nil if neither window is found.
+func (c *Client) Current5m() (*MarketInfo, error) {
+	now := time.Now().Unix()
+	period := int64(300)
+	current := (now / period) * period
+
+	for _, ts := range []int64{current, current + period} {
+		slug := fmt.Sprintf("btc-updown-5m-%d", ts)
+		info, err := c.fetchEvent(slug)
+		if err != nil {
+			return nil, err
+		}
+		if info != nil {
+			return info, nil
+		}
+	}
+	return nil, nil
+}
+
 // DiscoverBTC returns active BTC up/down markets expiring within window.
-// Generates slugs for 5m and 15m intervals and fetches them concurrently.
+// Used by -list only.
 func (c *Client) DiscoverBTC(window time.Duration) ([]MarketInfo, error) {
-	slugs := generateSlugs(window)
+	now := time.Now().Unix()
+	end := now + int64(window.Seconds())
+
+	var slugs []string
+	for _, period := range []int64{300, 900} {
+		label := "5m"
+		if period == 900 {
+			label = "15m"
+		}
+		start := (now / period) * period
+		for t := start; t < end; t += period {
+			slugs = append(slugs, fmt.Sprintf("btc-updown-%s-%d", label, t))
+		}
+	}
 
 	type result struct {
 		info *MarketInfo
 		err  error
 	}
 	ch := make(chan result, len(slugs))
-
 	for _, slug := range slugs {
 		slug := slug
 		go func() {
@@ -50,31 +83,11 @@ func (c *Client) DiscoverBTC(window time.Duration) ([]MarketInfo, error) {
 	var markets []MarketInfo
 	for range slugs {
 		r := <-ch
-		if r.err != nil || r.info == nil {
-			continue
+		if r.err == nil && r.info != nil {
+			markets = append(markets, *r.info)
 		}
-		markets = append(markets, *r.info)
 	}
 	return markets, nil
-}
-
-// generateSlugs produces btc-updown-5m and btc-updown-15m slugs for the window.
-func generateSlugs(window time.Duration) []string {
-	now := time.Now().Unix()
-	end := now + int64(window.Seconds())
-
-	var slugs []string
-	for _, period := range []int64{300, 900} { // 5m, 15m in seconds
-		label := "5m"
-		if period == 900 {
-			label = "15m"
-		}
-		start := (now / period) * period
-		for t := start; t < end; t += period {
-			slugs = append(slugs, fmt.Sprintf("btc-updown-%s-%d", label, t))
-		}
-	}
-	return slugs
 }
 
 // fetchEvent fetches a single event by slug and returns its MarketInfo.
