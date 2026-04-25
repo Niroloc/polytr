@@ -1,0 +1,98 @@
+{
+  "title": "Polymarket BTC Binary Options",
+  "uid": "polymarket-btc",
+  "schemaVersion": 36,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "BTC Spot Price",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "btc_spot_price",
+          "legendFormat": "BTC/USDT"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Market Price vs Fair Price (Black-Scholes)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "polymarket_mid_price",
+          "legendFormat": "Mid {{outcome}} {{token_id}}"
+        },
+        {
+          "expr": "polymarket_fair_price",
+          "legendFormat": "Fair {{outcome}} K={{strike}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Edge (Fair - Mid)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 0 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_edge",
+          "legendFormat": "Edge {{outcome}} {{token_id}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Bid / Ask / Spread",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "polymarket_best_bid",
+          "legendFormat": "Bid {{token_id}}"
+        },
+        {
+          "expr": "polymarket_best_ask",
+          "legendFormat": "Ask {{token_id}}"
+        },
+        {
+          "expr": "polymarket_spread",
+          "legendFormat": "Spread {{token_id}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Time to Expiry",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "unit": "s"
+      },
+      "targets": [
+        {
+          "expr": "polymarket_time_to_expiry_seconds",
+          "legendFormat": "{{token_id}}"
+        }
+      ]
+    }
+  ]
+}
