@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +20,7 @@ import (
 	"trading-polymarket/internal/auth"
 	"trading-polymarket/internal/btcprice"
 	"trading-polymarket/internal/csvlog"
+	"trading-polymarket/internal/gamma"
 	"trading-polymarket/internal/metrics"
 	"trading-polymarket/internal/polymarket"
 	"trading-polymarket/internal/pricing"
@@ -28,16 +28,15 @@ import (
 )
 
 func main() {
-	list := flag.Bool("list", false, "Print active BTC markets and exit (no tracking)")
-	discoverWindow := flag.Duration("discover-window", 1*time.Hour, "Auto-discover markets expiring within this window")
-	sigma := flag.Float64("sigma", 0.80, "Annualised volatility σ for Black-Scholes (e.g. 0.80)")
+	list := flag.Bool("list", false, "Print active BTC markets and exit")
+	discoverWindow := flag.Duration("discover-window", 1*time.Hour, "Track markets expiring within this window")
+	sigma := flag.Float64("sigma", 0.80, "Annualised volatility σ for Black-Scholes")
 	metricsAddr := flag.String("metrics", ":9100", "Prometheus /metrics listen address")
 	csvDir := flag.String("csv", "data", "Directory for CSV output files")
 	pollInterval := flag.Duration("poll", 5*time.Second, "Order book polling interval")
 	envFile := flag.String("env", ".env", "Path to .env file with API credentials")
 	flag.Parse()
 
-	// Load .env (silently skip if file is missing — env vars may already be set)
 	if err := godotenv.Load(*envFile); err != nil && !os.IsNotExist(err) {
 		log.Printf("[env] warning: %v", err)
 	}
@@ -48,25 +47,13 @@ func main() {
 	cfg.CSVDir = *csvDir
 	cfg.PollInterval = *pollInterval
 
-	// Always need a client for discovery / listing
-	pmClient := polymarket.NewClient(cfg.PolymarketCLOBURL)
+	gammaClient := gamma.NewClient()
 
 	// -list: print markets and exit
 	if *list {
-		printMarkets(pmClient, *discoverWindow)
+		printMarkets(gammaClient, *discoverWindow)
 		return
 	}
-
-	log.Printf("[discover] searching BTC markets expiring within %s...", *discoverWindow)
-	ids, err := discoverTokenIDs(pmClient, *discoverWindow)
-	if err != nil {
-		log.Fatalf("[discover] %v", err)
-	}
-	if len(ids) == 0 {
-		log.Fatalf("[discover] no active BTC markets found within %s", *discoverWindow)
-	}
-	cfg.MarketTokenIDs = ids
-	log.Printf("[discover] found %d token(s)", len(ids))
 
 	if err := cfg.LoadTrading(); err != nil {
 		log.Fatalf("[config] %v", err)
@@ -75,9 +62,23 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// BTC price feed
+	// Start BTC price feed and wait for first tick before using spot as strike.
 	priceFeed := btcprice.NewFeed(cfg.BinanceWSURL, cfg.BinancePair)
 	go priceFeed.Run(ctx)
+	log.Println("[btcprice] waiting for first BTC price...")
+	spot := priceFeed.WaitPrice(ctx)
+	if spot == 0 {
+		return // context cancelled
+	}
+	log.Printf("[btcprice] spot=%.2f", spot)
+
+	// Discover markets and populate metadata in one step.
+	log.Printf("[discover] searching BTC markets expiring within %s...", *discoverWindow)
+	cfg.MarketTokenIDs = discoverAndLoadMeta(gammaClient, spot, *discoverWindow)
+	if len(cfg.MarketTokenIDs) == 0 {
+		log.Fatalf("[discover] no active BTC markets found within %s", *discoverWindow)
+	}
+	log.Printf("[discover] tracking %d token(s)", len(cfg.MarketTokenIDs))
 
 	// CSV logger
 	csvWriter, err := csvlog.NewWriter(cfg.CSVDir)
@@ -85,6 +86,9 @@ func main() {
 		log.Fatalf("csvlog: %v", err)
 	}
 	defer csvWriter.Close()
+
+	// CLOB client for order book polling
+	pmClient := polymarket.NewClient(cfg.PolymarketCLOBURL)
 
 	// Trading infrastructure (only when credentials are present)
 	var tradeClient *trader.Client
@@ -111,46 +115,53 @@ func main() {
 		log.Printf("[trader] enabled — address=%s edge≥%.3f maxSize=%.1f USDC",
 			cfg.Trading.Address, cfg.Trading.EdgeThreshold, cfg.Trading.MaxSizeUSDC)
 	} else {
-		log.Println("[trader] disabled — no API keys found in .env (collect-only mode)")
+		log.Println("[trader] disabled — collect-only mode")
 	}
 
 	// Prometheus HTTP server
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	srv := &http.Server{Addr: cfg.MetricsAddr, Handler: mux}
 	go func() {
 		log.Printf("[metrics] listening on %s/metrics", cfg.MetricsAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[metrics] server error: %v", err)
+			log.Printf("[metrics] %v", err)
 		}
 	}()
 	defer srv.Shutdown(context.Background()) //nolint:errcheck
 
-	// Load market metadata at startup
-	loadMarketMeta(pmClient, cfg.MarketTokenIDs)
-
-	log.Printf("[collector] tracking %d token(s), σ=%.2f, poll=%s", len(cfg.MarketTokenIDs), cfg.Volatility, cfg.PollInterval)
+	log.Printf("[collector] σ=%.2f poll=%s", cfg.Volatility, cfg.PollInterval)
 
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
+
+	// Periodically re-discover to pick up new windows as old ones expire.
+	rediscoverTicker := time.NewTicker(*discoverWindow / 2)
+	defer rediscoverTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("[collector] shutting down")
 			return
+
+		case <-rediscoverTicker.C:
+			currentSpot := priceFeed.Price()
+			newIDs := discoverAndLoadMeta(gammaClient, currentSpot, *discoverWindow)
+			if len(newIDs) > 0 {
+				cfg.MarketTokenIDs = newIDs
+				log.Printf("[discover] refreshed — %d token(s)", len(newIDs))
+			}
+
 		case <-ticker.C:
-			spot := priceFeed.Price()
-			metrics.BTCSpotPrice.Set(spot)
+			currentSpot := priceFeed.Price()
+			metrics.BTCSpotPrice.Set(currentSpot)
 
 			for _, tokenID := range cfg.MarketTokenIDs {
-				tokenID = strings.TrimSpace(tokenID)
-				snap, err := pollToken(pmClient, csvWriter, tokenID, spot, cfg.Volatility)
+				snap, err := pollToken(pmClient, csvWriter, tokenID, currentSpot, cfg.Volatility)
 				if err != nil {
-					log.Printf("[collector] token %s: %v", tokenID, err)
+					log.Printf("[collector] token %.8s: %v", tokenID, err)
 					metrics.PollErrors.WithLabelValues(tokenID).Inc()
 					continue
 				}
@@ -162,68 +173,56 @@ func main() {
 	}
 }
 
-// maybeExecute runs the strategy and places an order if signalled.
-func maybeExecute(s *trader.Strategy, tc *trader.Client, snap trader.Snapshot) {
-	sig := s.Evaluate(snap)
-	if sig == nil {
-		return
-	}
-	resp, err := tc.PlaceOrder(*sig)
-	if err != nil {
-		log.Printf("[trader] place order failed for %s: %v", snap.TokenID[:min(8, len(snap.TokenID))], err)
-		return
-	}
-	s.RecordOpen(snap.TokenID, resp.OrderID)
-}
-
-// ── market metadata ──────────────────────────────────────────────────────────
+// ── metadata ──────────────────────────────────────────────────────────────────
 
 var marketMeta = map[string]tokenMeta{}
 
 type tokenMeta struct {
 	MarketID string
 	Outcome  string
-	Strike   string
+	Strike   float64 // BTC spot at market open; 0 = ATM (use current spot)
 	Expiry   time.Time
 }
 
-var strikeRe = regexp.MustCompile(`\$[\d,]+(?:\.\d+)?`)
-
-func parseStrike(question string) string {
-	m := strikeRe.FindString(question)
-	if m == "" {
-		return ""
+// discoverAndLoadMeta discovers active BTC markets via Gamma API,
+// populates marketMeta for each token, and returns the list of Up token IDs.
+// spot is used as the ATM strike for each discovered market.
+func discoverAndLoadMeta(gc *gamma.Client, spot float64, window time.Duration) []string {
+	markets, err := gc.DiscoverBTC(window)
+	if err != nil {
+		log.Printf("[discover] gamma error: %v", err)
+		return nil
 	}
-	return strings.ReplaceAll(m[1:], ",", "")
+
+	var ids []string
+	for _, m := range markets {
+		// Track both Up and Down tokens.
+		for _, entry := range []struct {
+			tokenID string
+			outcome string
+		}{
+			{m.UpTokenID, "Up"},
+			{m.DownTokenID, "Down"},
+		} {
+			if entry.tokenID == "" {
+				continue
+			}
+			marketMeta[entry.tokenID] = tokenMeta{
+				MarketID: m.ConditionID,
+				Outcome:  entry.outcome,
+				Strike:   spot,
+				Expiry:   m.EndDate,
+			}
+			ids = append(ids, entry.tokenID)
+		}
+		log.Printf("[meta] %.8s…  expiry=%s | %s",
+			m.UpTokenID, m.EndDate.Format("15:04:05Z"), m.Question)
+	}
+	return ids
 }
 
-func loadMarketMeta(client *polymarket.Client, tokenIDs []string) {
-	for _, tokenID := range tokenIDs {
-		tokenID = strings.TrimSpace(tokenID)
-		market, outcome, err := client.GetMarketByTokenID(tokenID)
-		if err != nil {
-			log.Printf("[meta] token %s: %v", tokenID, err)
-			continue
-		}
-		expiry, err := market.Expiry()
-		if err != nil {
-			log.Printf("[meta] token %s: parse expiry %q: %v", tokenID, market.EndDateISO, err)
-		}
-		strike := parseStrike(market.Question)
-		marketMeta[tokenID] = tokenMeta{
-			MarketID: market.ConditionID,
-			Outcome:  outcome,
-			Strike:   strike,
-			Expiry:   expiry,
-		}
-		log.Printf("[meta] token=%.8s outcome=%s strike=%s expiry=%s | %s",
-			tokenID, outcome, strike, expiry.Format(time.RFC3339), market.Question)
-	}
-}
+// ── poll loop ─────────────────────────────────────────────────────────────────
 
-// ── poll loop ────────────────────────────────────────────────────────────────
-
-// pollToken fetches the order book, updates metrics/CSV, and returns a Snapshot for the strategy.
 func pollToken(
 	client *polymarket.Client,
 	csv *csvlog.Writer,
@@ -243,13 +242,19 @@ func pollToken(
 		metrics.TimeToExpirySec.WithLabelValues(tokenID, meta.MarketID).Set(tte)
 	}
 
-	strike, _ := strconv.ParseFloat(meta.Strike, 64)
+	// ATM strike: use spot at market open; fall back to current spot.
+	strike := meta.Strike
+	if strike == 0 {
+		strike = spot
+	}
+	strikeStr := strconv.FormatFloat(strike, 'f', 2, 64)
 
 	var fair float64
 	if spot > 0 && strike > 0 && tte > 0 {
-		if meta.Outcome == "Yes" {
+		switch meta.Outcome {
+		case "Up":
 			fair = pricing.BinaryCallPrice(spot, strike, tte, sigma, 0)
-		} else {
+		case "Down":
 			fair = pricing.BinaryPutPrice(spot, strike, tte, sigma, 0)
 		}
 	}
@@ -265,20 +270,18 @@ func pollToken(
 	metrics.MarketBestAsk.WithLabelValues(lbls...).Set(ask)
 	metrics.MarketMidPrice.WithLabelValues(lbls...).Set(mid)
 	metrics.MarketSpread.WithLabelValues(lbls...).Set(spread)
+	metrics.FairPrice.WithLabelValues(append(lbls, strikeStr)...).Set(fair)
+	metrics.Edge.WithLabelValues(append(lbls, strikeStr)...).Set(edge)
 
-	strikeLbls := append(lbls, meta.Strike)
-	metrics.FairPrice.WithLabelValues(strikeLbls...).Set(fair)
-	metrics.Edge.WithLabelValues(strikeLbls...).Set(edge)
-
-	log.Printf("[%s] spot=%.2f bid=%.4f ask=%.4f mid=%.4f fair=%.4f edge=%+.4f tte=%.0fs",
-		tokenID[:min(8, len(tokenID))], spot, bid, ask, mid, fair, edge, tte)
+	log.Printf("[%.8s %s] spot=%.2f K=%.2f bid=%.4f ask=%.4f fair=%.4f edge=%+.4f tte=%.0fs",
+		tokenID, meta.Outcome, spot, strike, bid, ask, fair, edge, tte)
 
 	if err := csv.Write(csvlog.Snapshot{
 		Ts:         time.Now(),
 		MarketID:   meta.MarketID,
 		TokenID:    tokenID,
 		Outcome:    meta.Outcome,
-		Strike:     meta.Strike,
+		Strike:     strikeStr,
 		BTCSpot:    spot,
 		BestBid:    bid,
 		BestAsk:    ask,
@@ -288,7 +291,7 @@ func pollToken(
 		Edge:       edge,
 		TTESeconds: tte,
 	}); err != nil {
-		log.Printf("[csv] write error: %v", err)
+		log.Printf("[csv] %v", err)
 	}
 
 	return &trader.Snapshot{
@@ -303,27 +306,23 @@ func pollToken(
 	}, nil
 }
 
-// discoverTokenIDs fetches all active BTC markets expiring within window
-// and returns the YES token ID for each (one entry per market).
-func discoverTokenIDs(client *polymarket.Client, window time.Duration) ([]string, error) {
-	markets, err := client.DiscoverBTCMarkets(window, 10)
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func maybeExecute(s *trader.Strategy, tc *trader.Client, snap trader.Snapshot) {
+	sig := s.Evaluate(snap)
+	if sig == nil {
+		return
+	}
+	resp, err := tc.PlaceOrder(*sig)
 	if err != nil {
-		return nil, err
+		log.Printf("[trader] place order failed for %.8s: %v", snap.TokenID, err)
+		return
 	}
-	var ids []string
-	for _, m := range markets {
-		for _, t := range m.Tokens {
-			if t.Outcome == "Yes" {
-				ids = append(ids, t.TokenID)
-			}
-		}
-	}
-	return ids, nil
+	s.RecordOpen(snap.TokenID, resp.OrderID)
 }
 
-// printMarkets prints active BTC markets in a human-readable format and exits.
-func printMarkets(client *polymarket.Client, window time.Duration) {
-	markets, err := client.DiscoverBTCMarkets(window, 10)
+func printMarkets(gc *gamma.Client, window time.Duration) {
+	markets, err := gc.DiscoverBTC(window)
 	if err != nil {
 		log.Fatalf("[list] %v", err)
 	}
@@ -333,18 +332,11 @@ func printMarkets(client *polymarket.Client, window time.Duration) {
 	}
 	fmt.Printf("Active BTC markets (expiring within %s):\n\n", window)
 	for _, m := range markets {
-		fmt.Printf("Market:  %s\n", m.Question)
-		fmt.Printf("EndDate: %s\n", m.EndDateISO)
-		for _, t := range m.Tokens {
-			fmt.Printf("  token_id=%-66s outcome=%s\n", t.TokenID, t.Outcome)
-		}
-		fmt.Println()
+		fmt.Printf("%-60s  exp=%s\n", m.Question, m.EndDate.Format("15:04 UTC"))
+		fmt.Printf("  Up:   %s\n", m.UpTokenID)
+		fmt.Printf("  Down: %s\n\n", m.DownTokenID)
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+// strings is used in pollToken via strings.TrimSpace — keep import alive.
+var _ = strings.TrimSpace

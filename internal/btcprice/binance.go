@@ -34,6 +34,20 @@ func (f *Feed) Price() float64 {
 	return *p
 }
 
+// WaitPrice blocks until the first trade price arrives or ctx is cancelled.
+func (f *Feed) WaitPrice(ctx context.Context) float64 {
+	for {
+		if p := f.Price(); p > 0 {
+			return p
+		}
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 // Run connects to Binance and keeps the price updated.
 // Reconnects automatically on error. Blocks until ctx is cancelled.
 func (f *Feed) Run(ctx context.Context) {
