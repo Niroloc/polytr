@@ -155,7 +155,16 @@ func main() {
 			currentSpot := priceFeed.Price()
 			metrics.BTCSpotPrice.Set(currentSpot)
 
+			now := time.Now()
+			active := cfg.MarketTokenIDs[:0]
 			for _, tokenID := range cfg.MarketTokenIDs {
+				meta := marketMeta[tokenID]
+				if !meta.Expiry.IsZero() && now.After(meta.Expiry) {
+					log.Printf("[collector] token %.8s expired, removing", tokenID)
+					delete(marketMeta, tokenID)
+					continue
+				}
+				active = append(active, tokenID)
 				snap, err := pollToken(pmClient, csvWriter, tokenID, currentSpot, cfg.Volatility)
 				if err != nil {
 					log.Printf("[collector] token %.8s: %v", tokenID, err)
@@ -166,6 +175,7 @@ func main() {
 					maybeExecute(strategy, tradeClient, *snap)
 				}
 			}
+			cfg.MarketTokenIDs = active
 		}
 	}
 }
