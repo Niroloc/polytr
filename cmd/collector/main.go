@@ -28,7 +28,8 @@ import (
 )
 
 func main() {
-	tokenIDs := flag.String("tokens", "", "Comma-separated list of Polymarket token IDs to track")
+	list := flag.Bool("list", false, "Print active BTC markets and exit (no tracking)")
+	discoverWindow := flag.Duration("discover-window", 1*time.Hour, "Auto-discover markets expiring within this window")
 	sigma := flag.Float64("sigma", 0.80, "Annualised volatility σ for Black-Scholes (e.g. 0.80)")
 	metricsAddr := flag.String("metrics", ":9100", "Prometheus /metrics listen address")
 	csvDir := flag.String("csv", "data", "Directory for CSV output files")
@@ -36,24 +37,36 @@ func main() {
 	envFile := flag.String("env", ".env", "Path to .env file with API credentials")
 	flag.Parse()
 
-	if *tokenIDs == "" {
-		fmt.Fprintln(os.Stderr, "Usage: collector -tokens <id1,id2,...> [-sigma 0.80] [-metrics :9100] [-csv ./data] [-env .env]")
-		fmt.Fprintln(os.Stderr, "\nTo find token IDs run:")
-		fmt.Fprintln(os.Stderr, "  curl 'https://clob.polymarket.com/markets?tag=Bitcoin&limit=20' | jq '.data[] | {question:.question, tokens:.tokens}'")
-		os.Exit(1)
-	}
-
 	// Load .env (silently skip if file is missing — env vars may already be set)
 	if err := godotenv.Load(*envFile); err != nil && !os.IsNotExist(err) {
 		log.Printf("[env] warning: %v", err)
 	}
 
 	cfg := config.Default()
-	cfg.MarketTokenIDs = strings.Split(*tokenIDs, ",")
 	cfg.Volatility = *sigma
 	cfg.MetricsAddr = *metricsAddr
 	cfg.CSVDir = *csvDir
 	cfg.PollInterval = *pollInterval
+
+	// Always need a client for discovery / listing
+	pmClient := polymarket.NewClient(cfg.PolymarketCLOBURL)
+
+	// -list: print markets and exit
+	if *list {
+		printMarkets(pmClient, *discoverWindow)
+		return
+	}
+
+	log.Printf("[discover] searching BTC markets expiring within %s...", *discoverWindow)
+	ids, err := discoverTokenIDs(pmClient, *discoverWindow)
+	if err != nil {
+		log.Fatalf("[discover] %v", err)
+	}
+	if len(ids) == 0 {
+		log.Fatalf("[discover] no active BTC markets found within %s", *discoverWindow)
+	}
+	cfg.MarketTokenIDs = ids
+	log.Printf("[discover] found %d token(s)", len(ids))
 
 	if err := cfg.LoadTrading(); err != nil {
 		log.Fatalf("[config] %v", err)
@@ -72,9 +85,6 @@ func main() {
 		log.Fatalf("csvlog: %v", err)
 	}
 	defer csvWriter.Close()
-
-	// Polymarket read client
-	pmClient := polymarket.NewClient(cfg.PolymarketCLOBURL)
 
 	// Trading infrastructure (only when credentials are present)
 	var tradeClient *trader.Client
@@ -291,6 +301,45 @@ func pollToken(
 		Spread:    spread,
 		Expiry:    meta.Expiry,
 	}, nil
+}
+
+// discoverTokenIDs fetches all active BTC markets expiring within window
+// and returns the YES token ID for each (one entry per market).
+func discoverTokenIDs(client *polymarket.Client, window time.Duration) ([]string, error) {
+	markets, err := client.DiscoverBTCMarkets(window, 10)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, m := range markets {
+		for _, t := range m.Tokens {
+			if t.Outcome == "Yes" {
+				ids = append(ids, t.TokenID)
+			}
+		}
+	}
+	return ids, nil
+}
+
+// printMarkets prints active BTC markets in a human-readable format and exits.
+func printMarkets(client *polymarket.Client, window time.Duration) {
+	markets, err := client.DiscoverBTCMarkets(window, 10)
+	if err != nil {
+		log.Fatalf("[list] %v", err)
+	}
+	if len(markets) == 0 {
+		fmt.Printf("No active BTC markets expiring within %s\n", window)
+		return
+	}
+	fmt.Printf("Active BTC markets (expiring within %s):\n\n", window)
+	for _, m := range markets {
+		fmt.Printf("Market:  %s\n", m.Question)
+		fmt.Printf("EndDate: %s\n", m.EndDateISO)
+		for _, t := range m.Tokens {
+			fmt.Printf("  token_id=%-66s outcome=%s\n", t.TokenID, t.Outcome)
+		}
+		fmt.Println()
+	}
 }
 
 func min(a, b int) int {

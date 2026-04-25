@@ -66,17 +66,51 @@ func (c *Client) GetMarketByTokenID(tokenID string) (*Market, string, error) {
 	return m, outcome, nil
 }
 
-// SearchMarkets searches active BTC binary option markets by keyword.
-func (c *Client) SearchMarkets(query string, limit int) ([]Market, error) {
-	url := fmt.Sprintf("%s/markets?tag=Bitcoin&limit=%d", c.baseURL, limit)
-	var resp struct {
-		Data       []Market `json:"data"`
-		NextCursor string   `json:"next_cursor"`
+// DiscoverBTCMarkets returns active BTC binary option markets expiring within
+// the next maxAhead duration. Fetches up to maxPages pages of results.
+// Pass maxAhead=0 to skip the expiry filter and return all active markets.
+func (c *Client) DiscoverBTCMarkets(maxAhead time.Duration, maxPages int) ([]Market, error) {
+	var result []Market
+	cursor := ""
+	now := time.Now()
+
+	for page := 0; page < maxPages; page++ {
+		url := fmt.Sprintf("%s/markets?tag=Bitcoin&limit=50&active=true", c.baseURL)
+		if cursor != "" {
+			url += "&next_cursor=" + cursor
+		}
+
+		var resp struct {
+			Data       []Market `json:"data"`
+			NextCursor string   `json:"next_cursor"`
+		}
+		if err := c.get(url, &resp); err != nil {
+			return nil, err
+		}
+
+		for _, m := range resp.Data {
+			if m.Closed {
+				continue
+			}
+			if maxAhead > 0 {
+				exp, err := m.Expiry()
+				if err != nil {
+					continue
+				}
+				if exp.Before(now) || exp.After(now.Add(maxAhead)) {
+					continue
+				}
+			}
+			result = append(result, m)
+		}
+
+		if resp.NextCursor == "" || resp.NextCursor == "LTE=" {
+			break
+		}
+		cursor = resp.NextCursor
 	}
-	if err := c.get(url, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Data, nil
+
+	return result, nil
 }
 
 func (c *Client) get(url string, dst any) error {
