@@ -157,7 +157,7 @@ func main() {
 			metrics.BTCSpotPrice.Set(currentSpot)
 
 			now := time.Now()
-			active := cfg.MarketTokenIDs[:0]
+			var active []string
 			for _, tokenID := range cfg.MarketTokenIDs {
 				meta := marketMeta[tokenID]
 				if !meta.Expiry.IsZero() && now.After(meta.Expiry) {

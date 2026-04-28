@@ -3,7 +3,10 @@ package gamma
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -124,7 +127,7 @@ func (c *Client) fetchEvent(slug string) (*MarketInfo, error) {
 		if err != nil || len(ids) < 2 {
 			continue
 		}
-		endDate, _ := time.Parse(time.RFC3339, m.EndDate)
+		endDate := parseEndDate(m.EndDate, slug)
 		return &MarketInfo{
 			ConditionID: m.ConditionID,
 			Question:    m.Question,
@@ -157,6 +160,27 @@ func indexOfOutcome(outcomes []string, name string) int {
 		}
 	}
 	return 0 // fallback to first token
+}
+
+// parseEndDate tries several common ISO-8601 layouts. If all fail it derives the
+// expiry from the slug timestamp (btc-updown-5m-{unix}) + 300 s.
+func parseEndDate(raw, slug string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC()
+		}
+	}
+	// Fallback: derive from slug (btc-updown-5m-1234567890 → expiry = ts+300)
+	parts := strings.Split(slug, "-")
+	if len(parts) > 0 {
+		if ts, err := strconv.ParseInt(parts[len(parts)-1], 10, 64); err == nil {
+			derived := time.Unix(ts+300, 0).UTC()
+			log.Printf("[gamma] warning: could not parse endDate %q, using slug-derived %s", raw, derived.Format(time.RFC3339))
+			return derived
+		}
+	}
+	log.Printf("[gamma] warning: could not parse endDate %q and slug fallback failed", raw)
+	return time.Time{}
 }
 
 // ── raw API types ─────────────────────────────────────────────────────────────
