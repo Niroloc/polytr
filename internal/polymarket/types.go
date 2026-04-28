@@ -40,18 +40,20 @@ type OrderBook struct {
 	Ts       time.Time
 }
 
+// BestBid returns the highest bid. Bids arrive sorted ascending, so best is last.
 func (ob *OrderBook) BestBid() float64 {
 	if len(ob.Bids) == 0 {
 		return 0
 	}
-	return ob.Bids[0].Price
+	return ob.Bids[len(ob.Bids)-1].Price
 }
 
+// BestAsk returns the lowest ask. Asks arrive sorted descending, so best is last.
 func (ob *OrderBook) BestAsk() float64 {
 	if len(ob.Asks) == 0 {
 		return 0
 	}
-	return ob.Asks[0].Price
+	return ob.Asks[len(ob.Asks)-1].Price
 }
 
 func (ob *OrderBook) MidPrice() float64 {
