@@ -18,6 +18,22 @@
       ]
     },
     {
+      "id": 5,
+      "type": "stat",
+      "title": "Time to Expiry",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "unit": "s"
+      },
+      "targets": [
+        {
+          "expr": "polymarket_time_to_expiry_seconds",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
       "id": 2,
       "type": "timeseries",
       "title": "Market Price vs Fair Price (Black-Scholes)",
@@ -25,11 +41,11 @@
       "targets": [
         {
           "expr": "polymarket_mid_price",
-          "legendFormat": "Mid {{outcome}} {{token_id}}"
+          "legendFormat": "Mid {{outcome}}"
         },
         {
           "expr": "polymarket_fair_price",
-          "legendFormat": "Fair {{outcome}} K={{strike}}"
+          "legendFormat": "Fair {{outcome}}"
         }
       ]
     },
@@ -54,7 +70,7 @@
       "targets": [
         {
           "expr": "polymarket_edge",
-          "legendFormat": "Edge {{outcome}} {{token_id}}"
+          "legendFormat": "Edge {{outcome}}"
         }
       ]
     },
@@ -66,31 +82,30 @@
       "targets": [
         {
           "expr": "polymarket_best_bid",
-          "legendFormat": "Bid {{token_id}}"
+          "legendFormat": "Bid {{outcome}}"
         },
         {
           "expr": "polymarket_best_ask",
-          "legendFormat": "Ask {{token_id}}"
+          "legendFormat": "Ask {{outcome}}"
         },
         {
           "expr": "polymarket_spread",
-          "legendFormat": "Spread {{token_id}}"
+          "legendFormat": "Spread {{outcome}}"
         }
       ]
     },
     {
-      "id": 5,
+      "id": 6,
       "type": "stat",
-      "title": "Time to Expiry",
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "title": "Strike Price (ATM)",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
-        "unit": "s"
+        "reduceOptions": { "calcs": ["lastNotNull"] }
       },
       "targets": [
         {
-          "expr": "polymarket_time_to_expiry_seconds",
-          "legendFormat": "{{token_id}}"
+          "expr": "polymarket_strike",
+          "legendFormat": "K {{outcome}}"
         }
       ]
     }

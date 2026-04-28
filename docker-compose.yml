@@ -5,8 +5,7 @@ services:
     build: .
     restart: unless-stopped
     env_file:
-      - path: .env
-        required: false
+      - .env
     volumes:
       - ./data:/app/data
     depends_on:

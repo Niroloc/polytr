@@ -169,7 +169,7 @@ func main() {
 				snap, err := pollToken(pmClient, csvWriter, tokenID, currentSpot, cfg.Volatility)
 				if err != nil {
 					log.Printf("[collector] token %.8s: %v", tokenID, err)
-					metrics.PollErrors.WithLabelValues(tokenID).Inc()
+					metrics.PollErrors.WithLabelValues(marketMeta[tokenID].Outcome).Inc()
 					continue
 				}
 				if tradeClient != nil && strategy != nil {
@@ -213,12 +213,25 @@ func discoverAndLoadMeta(gc *gamma.Client, spot float64) []string {
 		{m.UpTokenID, "Up"},
 		{m.DownTokenID, "Down"},
 	} {
+		// Delete the old MarketInfo series for this outcome before registering the new one.
+		if old, ok := marketMeta[entry.tokenID]; !ok {
+			// Different token (new window): delete any old info series for this outcome.
+			for oldTokenID, oldMeta := range marketMeta {
+				if oldMeta.Outcome == entry.outcome {
+					metrics.MarketInfo.DeleteLabelValues(entry.outcome, oldTokenID, oldMeta.MarketID)
+				}
+			}
+		} else {
+			metrics.MarketInfo.DeleteLabelValues(entry.outcome, entry.tokenID, old.MarketID)
+		}
+
 		marketMeta[entry.tokenID] = tokenMeta{
 			MarketID: m.ConditionID,
 			Outcome:  entry.outcome,
 			Strike:   spot,
 			Expiry:   m.EndDate,
 		}
+		metrics.MarketInfo.WithLabelValues(entry.outcome, entry.tokenID, m.ConditionID).Set(1)
 	}
 
 	log.Printf("[discover] %s  exp=%s  K=%.2f",
@@ -245,7 +258,7 @@ func pollToken(
 	var tte float64
 	if !meta.Expiry.IsZero() {
 		tte = pricing.TimeToExpiry(meta.Expiry)
-		metrics.TimeToExpirySec.WithLabelValues(tokenID, meta.MarketID).Set(tte)
+		metrics.TimeToExpirySec.WithLabelValues(meta.Outcome).Set(tte)
 	}
 
 	// ATM strike: use spot at market open; fall back to current spot.
@@ -271,13 +284,14 @@ func pollToken(
 	spread := ob.Spread()
 	edge := fair - mid
 
-	lbls := []string{tokenID, meta.MarketID, meta.Outcome}
-	metrics.MarketBestBid.WithLabelValues(lbls...).Set(bid)
-	metrics.MarketBestAsk.WithLabelValues(lbls...).Set(ask)
-	metrics.MarketMidPrice.WithLabelValues(lbls...).Set(mid)
-	metrics.MarketSpread.WithLabelValues(lbls...).Set(spread)
-	metrics.FairPrice.WithLabelValues(append(lbls, strikeStr)...).Set(fair)
-	metrics.Edge.WithLabelValues(append(lbls, strikeStr)...).Set(edge)
+	out := meta.Outcome
+	metrics.MarketBestBid.WithLabelValues(out).Set(bid)
+	metrics.MarketBestAsk.WithLabelValues(out).Set(ask)
+	metrics.MarketMidPrice.WithLabelValues(out).Set(mid)
+	metrics.MarketSpread.WithLabelValues(out).Set(spread)
+	metrics.FairPrice.WithLabelValues(out).Set(fair)
+	metrics.Edge.WithLabelValues(out).Set(edge)
+	metrics.Strike.WithLabelValues(out).Set(strike)
 
 	log.Printf("[%.8s %s] spot=%.2f K=%.2f bid=%.4f ask=%.4f fair=%.4f edge=%+.4f tte=%.0fs",
 		tokenID, meta.Outcome, spot, strike, bid, ask, fair, edge, tte)
