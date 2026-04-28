@@ -134,9 +134,9 @@ func main() {
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
-	// Re-discover every 5 minutes to switch to the next window.
-	rediscoverTicker := time.NewTicker(5 * time.Minute)
-	defer rediscoverTicker.Stop()
+	// Re-discover aligned to 5-minute window boundaries.
+	rediscoverTimer := time.NewTimer(untilNextWindow())
+	defer rediscoverTimer.Stop()
 
 	for {
 		select {
@@ -144,12 +144,13 @@ func main() {
 			log.Println("[collector] shutting down")
 			return
 
-		case <-rediscoverTicker.C:
+		case <-rediscoverTimer.C:
 			currentSpot := priceFeed.Price()
 			newIDs := discoverAndLoadMeta(gammaClient, currentSpot)
 			if len(newIDs) > 0 {
 				cfg.MarketTokenIDs = newIDs
 			}
+			rediscoverTimer.Reset(untilNextWindow())
 
 		case <-ticker.C:
 			currentSpot := priceFeed.Price()
@@ -341,6 +342,15 @@ func printMarkets(gc *gamma.Client, window time.Duration) {
 		fmt.Printf("  Up:   %s\n", m.UpTokenID)
 		fmt.Printf("  Down: %s\n\n", m.DownTokenID)
 	}
+}
+
+// untilNextWindow returns the duration until the next 5-minute boundary + 2s buffer.
+// This ensures rediscover fires right after the new window opens on Polymarket.
+func untilNextWindow() time.Duration {
+	const period = 300
+	now := time.Now().Unix()
+	next := (now/period+1)*period + 2 // +2s buffer for Polymarket to publish the new market
+	return time.Duration(next-now) * time.Second
 }
 
 // strings is used in pollToken via strings.TrimSpace — keep import alive.
