@@ -35,6 +35,8 @@ func main() {
 	csvDir := flag.String("csv", "data", "Directory for CSV output files")
 	pollInterval := flag.Duration("poll", 5*time.Second, "Order book polling interval")
 	envFile := flag.String("env", ".env", "Path to .env file with API credentials")
+	btcSource := flag.String("btc-source", "polymarket", "BTC price source: polymarket (Chainlink on-chain) or binance (WebSocket)")
+	polygonRPC := flag.String("polygon-rpc", btcprice.DefaultPolygonRPC, "Polygon JSON-RPC URL for Chainlink price feed")
 	flag.Parse()
 
 	if err := godotenv.Load(*envFile); err != nil && !os.IsNotExist(err) {
@@ -63,7 +65,15 @@ func main() {
 	defer cancel()
 
 	// Start BTC price feed and wait for first tick before using spot as strike.
-	priceFeed := btcprice.NewFeed(cfg.BinanceWSURL, cfg.BinancePair)
+	var priceFeed btcprice.Source
+	switch *btcSource {
+	case "polymarket":
+		priceFeed = btcprice.NewChainlinkFeed(*polygonRPC)
+	case "binance":
+		priceFeed = btcprice.NewFeed(cfg.BinanceWSURL, cfg.BinancePair)
+	default:
+		log.Fatalf("[btcprice] unknown source %q — choose polymarket or binance", *btcSource)
+	}
 	go priceFeed.Run(ctx)
 	log.Println("[btcprice] waiting for first BTC price...")
 	spot := priceFeed.WaitPrice(ctx)
