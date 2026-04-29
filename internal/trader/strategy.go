@@ -20,11 +20,12 @@ type Snapshot struct {
 
 // Params controls the simple edge strategy.
 type Params struct {
-	EdgeThreshold float64
-	MaxSizeUSDC   float64
-	MinSizeUSDC   float64
-	PriceOffset   float64 // how far from mid to place (e.g. 0.01)
-	OrderTTL      time.Duration
+	EdgeThreshold    float64
+	MaxSizeUSDC      float64
+	MinSizeUSDC      float64
+	PriceOffset      float64 // how far from mid to place (e.g. 0.01)
+	OrderTTL         time.Duration
+	MaxWindowRiskUSDC float64 // total USDC at risk per 5-minute window (0 = unlimited)
 }
 
 // Strategy decides whether to trade based on edge.

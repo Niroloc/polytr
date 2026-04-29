@@ -3,13 +3,21 @@
   "uid": "polymarket-btc",
   "schemaVersion": 36,
   "refresh": "5s",
-  "time": { "from": "now-30m", "to": "now" },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
   "panels": [
     {
       "id": 1,
       "type": "timeseries",
       "title": "BTC Spot Price",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
           "expr": "btc_spot_price",
@@ -21,9 +29,18 @@
       "id": 5,
       "type": "stat",
       "title": "Time to Expiry",
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
         "unit": "s"
       },
       "targets": [
@@ -37,7 +54,12 @@
       "id": 2,
       "type": "timeseries",
       "title": "Market Price vs Fair Price (Black-Scholes)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
       "targets": [
         {
           "expr": "polymarket_mid_price",
@@ -53,16 +75,29 @@
       "id": 3,
       "type": "timeseries",
       "title": "Edge (Fair - Mid)",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 14 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "thresholdsStyle": { "mode": "line" }
+            "thresholdsStyle": {
+              "mode": "line"
+            }
           },
           "thresholds": {
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 0 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
             ]
           }
         }
@@ -78,7 +113,12 @@
       "id": 4,
       "type": "timeseries",
       "title": "Bid / Ask / Spread",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 14 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
       "targets": [
         {
           "expr": "polymarket_best_bid",
@@ -98,14 +138,304 @@
       "id": 6,
       "type": "stat",
       "title": "Strike Price (ATM)",
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
       },
       "targets": [
         {
           "expr": "polymarket_strike",
           "legendFormat": "K {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Paper Trading \u2014 Cumulative Daily P&L",
+      "description": "Running P&L from midnight UTC today. Resets to 0 at each new calendar day.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "area"
+            }
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "rgba(200,0,0,0.08)",
+                "value": null
+              },
+              {
+                "color": "rgba(0,200,0,0.08)",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_paper_daily_pnl",
+          "legendFormat": "Daily P&L"
+        },
+        {
+          "expr": "polymarket_paper_total_pnl",
+          "legendFormat": "All-time P&L"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Paper Trading \u2014 Unrealized P&L",
+      "description": "Mark-to-market P&L of open paper positions, updated each poll tick. Resets to 0 when the window closes.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_paper_unrealized_pnl",
+          "legendFormat": "Unrealized {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Paper Trading \u2014 Realized P&L per Window",
+      "description": "P&L booked when each 5-minute window closes (marked-to-market at last mid price).",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_paper_window_pnl",
+          "legendFormat": "Window P&L {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Paper Trading \u2014 Position (contracts)",
+      "description": "Signed contract count per outcome. Positive = long, negative = short, 0 = flat.",
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_paper_position_contracts",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Paper Trading \u2014 Window Risk Budget",
+      "description": "USDC committed vs. the $100 limit for the current 5-minute window.",
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_paper_window_risk_used_usdc",
+          "legendFormat": "Risk used"
+        },
+        {
+          "expr": "polymarket_paper_window_risk_limit_usdc",
+          "legendFormat": "Limit ($100)"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Paper Trading \u2014 Cumulative P&L",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 41
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_paper_total_pnl",
+          "legendFormat": "Total P&L"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Paper Trading \u2014 Entry Prices",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 41
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_paper_entry_price",
+          "legendFormat": "{{side}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Paper Trading \u2014 Trade Count",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 41
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_paper_trades_total",
+          "legendFormat": "{{side}} {{outcome}}"
         }
       ]
     }

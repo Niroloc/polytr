@@ -88,12 +88,18 @@ func main() {
 		log.Fatal("[discover] no active BTC 5m market found")
 	}
 
-	// CSV logger
+	// CSV loggers
 	csvWriter, err := csvlog.NewWriter(cfg.CSVDir)
 	if err != nil {
 		log.Fatalf("csvlog: %v", err)
 	}
 	defer csvWriter.Close()
+
+	windowLog, err := csvlog.NewWindowWriter(cfg.CSVDir)
+	if err != nil {
+		log.Fatalf("windowlog: %v", err)
+	}
+	defer windowLog.Close()
 
 	// CLOB client for order book polling
 	pmClient := polymarket.NewClient(cfg.PolymarketCLOBURL)
@@ -123,7 +129,20 @@ func main() {
 		log.Printf("[trader] enabled — address=%s edge≥%.3f maxSize=%.1f USDC",
 			cfg.Trading.Address, cfg.Trading.EdgeThreshold, cfg.Trading.MaxSizeUSDC)
 	} else {
-		log.Println("[trader] disabled — collect-only mode")
+		log.Println("[trader] disabled — collect-only mode (paper trading active)")
+	}
+
+	// Paper trader runs in collect-only mode to simulate strategy execution.
+	var paperTrader *trader.PaperTrader
+	if !cfg.Trading.Enabled {
+		paperTrader = trader.NewPaperTrader(trader.Params{
+			EdgeThreshold:     cfg.Trading.EdgeThreshold,
+			MaxSizeUSDC:       cfg.Trading.MaxSizeUSDC,
+			MinSizeUSDC:       cfg.Trading.MinSizeUSDC,
+			PriceOffset:       cfg.Trading.PriceOffset,
+			OrderTTL:          cfg.Trading.OrderTTL,
+			MaxWindowRiskUSDC: 100,
+		}, windowLog)
 	}
 
 	// Prometheus HTTP server
@@ -158,6 +177,20 @@ func main() {
 			currentSpot := priceFeed.Price()
 			newIDs := discoverAndLoadMeta(gammaClient, currentSpot)
 			if len(newIDs) > 0 {
+				// Close paper positions on outgoing tokens, then reset the window budget.
+				if paperTrader != nil {
+					newSet := make(map[string]bool, len(newIDs))
+					for _, id := range newIDs {
+						newSet[id] = true
+					}
+					for _, oldID := range cfg.MarketTokenIDs {
+						if !newSet[oldID] {
+							m := marketMeta[oldID]
+							paperTrader.OnExpiry(oldID, m.Outcome, m.LastMid)
+						}
+					}
+					paperTrader.OnNewWindow()
+				}
 				cfg.MarketTokenIDs = newIDs
 			}
 			rediscoverTimer.Reset(untilNextWindow())
@@ -172,6 +205,9 @@ func main() {
 				meta := marketMeta[tokenID]
 				if !meta.Expiry.IsZero() && now.After(meta.Expiry) {
 					log.Printf("[collector] token %.8s expired, removing", tokenID)
+					if paperTrader != nil {
+						paperTrader.OnExpiry(tokenID, meta.Outcome, meta.LastMid)
+					}
 					delete(marketMeta, tokenID)
 					continue
 				}
@@ -182,11 +218,23 @@ func main() {
 					metrics.PollErrors.WithLabelValues(marketMeta[tokenID].Outcome).Inc()
 					continue
 				}
+				// Keep LastMid fresh for paper position closure on expiry.
+				m := marketMeta[tokenID]
+				m.LastMid = snap.MidPrice
+				marketMeta[tokenID] = m
+
 				if tradeClient != nil && strategy != nil {
 					maybeExecute(strategy, tradeClient, *snap)
 				}
+				if paperTrader != nil {
+					paperTrader.OnTick(*snap)
+				}
 			}
 			cfg.MarketTokenIDs = active
+			// All tokens expired without rediscovery — reset window risk budget.
+			if paperTrader != nil && len(active) == 0 {
+				paperTrader.OnNewWindow()
+			}
 		}
 	}
 }
@@ -200,6 +248,7 @@ type tokenMeta struct {
 	Outcome  string
 	Strike   float64 // BTC spot at market open; 0 = ATM (use current spot)
 	Expiry   time.Time
+	LastMid  float64 // most recent mid price; used to close paper positions
 }
 
 // discoverAndLoadMeta fetches the current 5-minute BTC market pair,

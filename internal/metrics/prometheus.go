@@ -66,4 +66,58 @@ var (
 		Name: "polymarket_poll_errors_total",
 		Help: "Total number of errors polling Polymarket",
 	}, []string{"outcome"})
+
+	// ── paper trading ──────────────────────────────────────────────────────────
+
+	PaperTradeEntryPrice = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "polymarket_paper_entry_price",
+		Help: "Entry price of the most recent paper trade",
+	}, []string{"outcome", "side"})
+
+	PaperTradeSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "polymarket_paper_trade_size_usdc",
+		Help: "Notional size in USDC of the most recent paper trade",
+	}, []string{"outcome", "side"})
+
+	PaperUnrealizedPnL = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "polymarket_paper_unrealized_pnl",
+		Help: "Mark-to-market unrealized P&L for the open paper position",
+	}, []string{"outcome"})
+
+	PaperWindowPnL = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "polymarket_paper_window_pnl",
+		Help: "Realized P&L of the most recently closed 5-minute window per outcome",
+	}, []string{"outcome"})
+
+	PaperTotalPnL = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "polymarket_paper_total_pnl",
+		Help: "Cumulative paper trading P&L since start",
+	})
+
+	PaperTradesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "polymarket_paper_trades_total",
+		Help: "Number of paper trades executed",
+	}, []string{"outcome", "side"})
+
+	// Signed contract count: positive = long, negative = short, 0 = no position.
+	PaperPositionContracts = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "polymarket_paper_position_contracts",
+		Help: "Current paper position in contracts (+long / −short)",
+	}, []string{"outcome"})
+
+	PaperWindowRiskUsed = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "polymarket_paper_window_risk_used_usdc",
+		Help: "USDC committed to paper trades in the current 5-minute window",
+	})
+
+	PaperWindowRiskLimit = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "polymarket_paper_window_risk_limit_usdc",
+		Help: "Maximum USDC risk allowed per 5-minute window",
+	})
+
+	// Resets to 0 at midnight UTC; shows today's running P&L.
+	PaperDailyPnL = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "polymarket_paper_daily_pnl",
+		Help: "Paper trading P&L accumulated since midnight UTC today",
+	})
 )
