@@ -68,7 +68,7 @@ func main() {
 	var priceFeed btcprice.Source
 	switch *btcSource {
 	case "polymarket":
-		priceFeed = btcprice.NewCoinbaseFeed()
+		priceFeed = btcprice.NewChainlinkFeed(*polygonRPC)
 	case "binance":
 		priceFeed = btcprice.NewFeed(cfg.BinanceWSURL, cfg.BinancePair)
 	default:
