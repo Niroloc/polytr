@@ -33,7 +33,7 @@ func main() {
 	sigma := flag.Float64("sigma", 0.80, "Annualised volatility σ for Black-Scholes")
 	metricsAddr := flag.String("metrics", ":9100", "Prometheus /metrics listen address")
 	csvDir := flag.String("csv", "data", "Directory for CSV output files")
-	pollInterval := flag.Duration("poll", 5*time.Second, "Order book polling interval")
+	pollInterval := flag.Duration("poll", 2*time.Second, "Order book polling interval")
 	envFile := flag.String("env", ".env", "Path to .env file with API credentials")
 	btcSource := flag.String("btc-source", "polymarket", "BTC price source: polymarket (Chainlink on-chain) or binance (WebSocket)")
 	polygonRPC := flag.String("polygon-rpc", btcprice.DefaultPolygonRPC, "Polygon JSON-RPC URL for Chainlink price feed")
@@ -68,7 +68,7 @@ func main() {
 	var priceFeed btcprice.Source
 	switch *btcSource {
 	case "polymarket":
-		priceFeed = btcprice.NewChainlinkFeed(*polygonRPC)
+		priceFeed = btcprice.NewCoinbaseFeed()
 	case "binance":
 		priceFeed = btcprice.NewFeed(cfg.BinanceWSURL, cfg.BinancePair)
 	default:
