@@ -30,10 +30,10 @@ import (
 func main() {
 	list := flag.Bool("list", false, "Print active BTC markets and exit")
 	discoverWindow := flag.Duration("discover-window", 1*time.Hour, "Track markets expiring within this window")
-	sigma := flag.Float64("sigma", 0.80, "Annualised volatility σ for Black-Scholes")
+	sigma := flag.Float64("sigma", 0.20, "Annualised volatility σ for Black-Scholes")
 	metricsAddr := flag.String("metrics", ":9100", "Prometheus /metrics listen address")
 	csvDir := flag.String("csv", "data", "Directory for CSV output files")
-	pollInterval := flag.Duration("poll", 2*time.Second, "Order book polling interval")
+	pollInterval := flag.Duration("poll", 4*time.Second, "Order book polling interval")
 	envFile := flag.String("env", ".env", "Path to .env file with API credentials")
 	btcSource := flag.String("btc-source", "polymarket", "BTC price source: polymarket (Chainlink on-chain) or binance (WebSocket)")
 	polygonRPC := flag.String("polygon-rpc", btcprice.DefaultPolygonRPC, "Polygon JSON-RPC URL for Chainlink price feed")
@@ -137,11 +137,11 @@ func main() {
 	if !cfg.Trading.Enabled {
 		paperTrader = trader.NewPaperTrader(trader.Params{
 			EdgeThreshold:     cfg.Trading.EdgeThreshold,
-			MaxSizeUSDC:       cfg.Trading.MaxSizeUSDC,
-			MinSizeUSDC:       cfg.Trading.MinSizeUSDC,
+			MaxSizeUSDC:       20,   // max USDC per individual buy tick
+			MinSizeUSDC:       1,
 			PriceOffset:       cfg.Trading.PriceOffset,
 			OrderTTL:          cfg.Trading.OrderTTL,
-			MaxWindowRiskUSDC: 100,
+			MaxWindowRiskUSDC: 100, // total net position limit per window
 		}, windowLog)
 	}
 
@@ -186,7 +186,7 @@ func main() {
 					for _, oldID := range cfg.MarketTokenIDs {
 						if !newSet[oldID] {
 							m := marketMeta[oldID]
-							paperTrader.OnExpiry(oldID, m.Outcome, m.LastMid)
+							paperTrader.OnExpiry(oldID, m.Outcome, computeSettlement(m.Outcome, currentSpot, m.Strike))
 						}
 					}
 					paperTrader.OnNewWindow()
@@ -206,7 +206,7 @@ func main() {
 				if !meta.Expiry.IsZero() && now.After(meta.Expiry) {
 					log.Printf("[collector] token %.8s expired, removing", tokenID)
 					if paperTrader != nil {
-						paperTrader.OnExpiry(tokenID, meta.Outcome, meta.LastMid)
+						paperTrader.OnExpiry(tokenID, meta.Outcome, computeSettlement(meta.Outcome, currentSpot, meta.Strike))
 					}
 					delete(marketMeta, tokenID)
 					continue
@@ -218,11 +218,6 @@ func main() {
 					metrics.PollErrors.WithLabelValues(marketMeta[tokenID].Outcome).Inc()
 					continue
 				}
-				// Keep LastMid fresh for paper position closure on expiry.
-				m := marketMeta[tokenID]
-				m.LastMid = snap.MidPrice
-				marketMeta[tokenID] = m
-
 				if tradeClient != nil && strategy != nil {
 					maybeExecute(strategy, tradeClient, *snap)
 				}
@@ -248,7 +243,6 @@ type tokenMeta struct {
 	Outcome  string
 	Strike   float64 // BTC spot at market open; 0 = ATM (use current spot)
 	Expiry   time.Time
-	LastMid  float64 // most recent mid price; used to close paper positions
 }
 
 // discoverAndLoadMeta fetches the current 5-minute BTC market pair,
@@ -424,6 +418,16 @@ func untilNextWindow() time.Duration {
 	now := time.Now().Unix()
 	next := (now/period+1)*period + 2 // +2s buffer for Polymarket to publish the new market
 	return time.Duration(next-now) * time.Second
+}
+
+// computeSettlement returns the binary settlement value (1.0 = ITM, 0.0 = OTM).
+// Up wins when spot >= strike; Down wins otherwise.
+func computeSettlement(outcome string, spot, strike float64) float64 {
+	upWon := spot >= strike
+	if (outcome == "Up" && upWon) || (outcome == "Down" && !upWon) {
+		return 1.0
+	}
+	return 0.0
 }
 
 // strings is used in pollToken via strings.TrimSpace — keep import alive.

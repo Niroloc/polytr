@@ -99,11 +99,12 @@ var (
 		Help: "Number of paper trades executed",
 	}, []string{"outcome", "side"})
 
-	// Signed contract count: positive = long, negative = short, 0 = no position.
-	PaperPositionContracts = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "polymarket_paper_position_contracts",
-		Help: "Current paper position in contracts (+long / −short)",
-	}, []string{"outcome"})
+	// Net position in USDC: positive = long Up, negative = long Down, 0 = flat.
+	// |net| is bounded by MaxWindowRiskUSDC.
+	PaperPositionNetUSDC = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "polymarket_paper_position_net_usdc",
+		Help: "Net paper position in USDC: +N = long Up by $N, −N = long Down by $N",
+	})
 
 	PaperWindowRiskUsed = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "polymarket_paper_window_risk_used_usdc",

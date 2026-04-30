@@ -12,21 +12,21 @@ import (
 // WindowRecord summarises the result of one 5-minute paper-trading window
 // for a single outcome (Up or Down).
 type WindowRecord struct {
-	ClosedAt    time.Time
-	Outcome     string
-	Side        string  // "BUY", "SELL", or "" if no trade was taken
-	EntryPrice  float64 // 0 if no trade
-	ExitPrice   float64 // last mid price at expiry; 0 if no trade
-	Contracts   float64 // signed: +N long, −N short; 0 if no trade
-	CostUSDC    float64 // USDC at risk; 0 if no trade
-	RealizedPnL float64 // P&L for this outcome this window
-	DailyPnL    float64 // running P&L for the current calendar day (UTC)
-	TotalPnL    float64 // all-time cumulative P&L
+	ClosedAt        time.Time
+	Outcome         string
+	Side            string  // "BUY" or "" if no trade was taken
+	EntryPrice      float64 // 0 if no trade
+	SettlementPrice float64 // 1.0 if option finished ITM, 0.0 otherwise
+	Shares          float64 // contracts held (always positive); 0 if no trade
+	CostUSDC        float64 // USDC at risk; 0 if no trade
+	RealizedPnL     float64 // P&L for this outcome this window
+	DailyPnL        float64 // running P&L for the current calendar day (UTC)
+	TotalPnL        float64 // all-time cumulative P&L
 }
 
 var windowHeader = []string{
 	"timestamp", "outcome", "side",
-	"entry_price", "exit_price", "contracts", "cost_usdc",
+	"entry_price", "settlement_price", "shares", "cost_usdc",
 	"realized_pnl", "daily_pnl", "total_pnl",
 }
 
@@ -60,8 +60,8 @@ func (ww *WindowWriter) Write(r WindowRecord) error {
 		r.Outcome,
 		r.Side,
 		f(r.EntryPrice),
-		f(r.ExitPrice),
-		f(r.Contracts),
+		f(r.SettlementPrice),
+		f(r.Shares),
 		f(r.CostUSDC),
 		f(r.RealizedPnL),
 		f(r.DailyPnL),

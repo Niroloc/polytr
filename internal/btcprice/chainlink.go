@@ -17,10 +17,14 @@ import (
 // chainlinkFeed reads the BTC/USD Chainlink aggregator on Polygon via JSON-RPC.
 // This is the exact oracle Polymarket uses to settle BTC Up/Down markets
 // (https://data.chain.link/streams/btc-usd).
+//
+// Multiple RPC endpoints are tried in round-robin order; on any error the feed
+// rotates to the next endpoint so a single overloaded node doesn't stall pricing.
 type chainlinkFeed struct {
 	mu     sync.Mutex
 	price  float64
-	rpcURL string
+	urls   []string // candidate RPC endpoints
+	urlIdx int      // index of the currently active endpoint
 	client *http.Client
 }
 
@@ -30,15 +34,30 @@ const (
 	// latestAnswer() ABI selector.
 	latestAnswerSel = "0x50d25bcd"
 
-	DefaultPolygonRPC = "https://1rpc.io/matic"
+	// DefaultPolygonRPC is the primary endpoint used when --polygon-rpc is omitted.
+	DefaultPolygonRPC = "https://polygon.llamarpc.com"
 )
 
+// builtinRPCs is the fallback pool — free, no-key public Polygon endpoints.
+var builtinRPCs = []string{
+	"https://polygon.llamarpc.com",
+	"https://polygon.drpc.org",
+	"https://polygon-bor-rpc.publicnode.com",
+	"https://rpc.ankr.com/polygon",
+}
+
 func NewChainlinkFeed(rpcURL string) Source {
-	if rpcURL == "" {
-		rpcURL = DefaultPolygonRPC
+	urls := make([]string, 0, len(builtinRPCs)+1)
+	if rpcURL != "" {
+		urls = append(urls, rpcURL)
+	}
+	for _, u := range builtinRPCs {
+		if u != rpcURL {
+			urls = append(urls, u)
+		}
 	}
 	return &chainlinkFeed{
-		rpcURL: rpcURL,
+		urls:   urls,
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
 }
@@ -63,7 +82,11 @@ func (f *chainlinkFeed) WaitPrice(ctx context.Context) float64 {
 }
 
 func (f *chainlinkFeed) Run(ctx context.Context) {
-	log.Printf("[btcprice] chainlink: polling %s (contract %s)", f.rpcURL, chainlinkBTCUSD)
+	f.mu.Lock()
+	primary := f.urls[0]
+	f.mu.Unlock()
+	log.Printf("[btcprice] chainlink: primary=%s  fallbacks=%d  contract=%s",
+		primary, len(f.urls)-1, chainlinkBTCUSD)
 	f.fetch()
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -78,18 +101,30 @@ func (f *chainlinkFeed) Run(ctx context.Context) {
 }
 
 func (f *chainlinkFeed) fetch() {
-	p, err := f.latestAnswer()
-	if err != nil {
-		log.Printf("[btcprice] chainlink: %v", err)
+	f.mu.Lock()
+	startIdx := f.urlIdx
+	f.mu.Unlock()
+
+	for i := range f.urls {
+		idx := (startIdx + i) % len(f.urls)
+		p, err := f.latestAnswer(f.urls[idx])
+		if err != nil {
+			log.Printf("[btcprice] chainlink [%s]: %v — trying next", f.urls[idx], err)
+			f.mu.Lock()
+			f.urlIdx = (idx + 1) % len(f.urls)
+			f.mu.Unlock()
+			continue
+		}
+		f.mu.Lock()
+		f.price = p
+		f.urlIdx = idx // stick with the working endpoint
+		f.mu.Unlock()
 		return
 	}
-	f.mu.Lock()
-	f.price = p
-	f.mu.Unlock()
 }
 
 // latestAnswer calls latestAnswer() on the Chainlink aggregator via eth_call.
-func (f *chainlinkFeed) latestAnswer() (float64, error) {
+func (f *chainlinkFeed) latestAnswer(rpcURL string) (float64, error) {
 	body, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "eth_call",
@@ -103,7 +138,7 @@ func (f *chainlinkFeed) latestAnswer() (float64, error) {
 		"id": 1,
 	})
 
-	resp, err := f.client.Post(f.rpcURL, "application/json", bytes.NewReader(body))
+	resp, err := f.client.Post(rpcURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("rpc: %w", err)
 	}
@@ -129,7 +164,6 @@ func (f *chainlinkFeed) latestAnswer() (float64, error) {
 	}
 	// int256 big-endian; BTC/USD is always positive so treat as unsigned.
 	n := new(big.Int).SetBytes(b)
-	// Chainlink BTC/USD has 8 decimal places.
 	price := float64(n.Int64()) / 1e8
 	return price, nil
 }

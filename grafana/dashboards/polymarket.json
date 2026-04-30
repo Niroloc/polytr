@@ -285,8 +285,8 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Paper Trading \u2014 Position (contracts)",
-      "description": "Signed contract count per outcome. Positive = long, negative = short, 0 = flat.",
+      "title": "Paper Trading \u2014 Net Position (USDC)",
+      "description": "Net position in USDC: +N = long Up by $N, \u2212N = long Down by $N, 0 = flat. |net| \u2264 $100.",
       "gridPos": {
         "h": 5,
         "w": 12,
@@ -295,6 +295,7 @@
       },
       "fieldConfig": {
         "defaults": {
+          "unit": "currencyUSD",
           "custom": {
             "thresholdsStyle": {
               "mode": "line"
@@ -316,8 +317,8 @@
       },
       "targets": [
         {
-          "expr": "polymarket_paper_position_contracts",
-          "legendFormat": "{{outcome}}"
+          "expr": "polymarket_paper_position_net_usdc",
+          "legendFormat": "Net position"
         }
       ]
     },

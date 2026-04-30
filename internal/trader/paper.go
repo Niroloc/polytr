@@ -2,6 +2,7 @@ package trader
 
 import (
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -10,35 +11,39 @@ import (
 )
 
 // PaperTrader simulates strategy execution without real orders.
-// It is used in collect-only mode to track hypothetical P&L.
 //
-// Risk budget: total USDC spent across all trades in a 5-minute window is
-// capped at Params.MaxWindowRiskUSDC. Individual trade size is reduced to fit
-// the remaining budget; if the remainder is below MinSizeUSDC the trade is skipped.
+// Position model:
 //
-// P&L model (mark-to-market, closed at final mid on window expiry):
+//	netUSDC = Σ cost(Up positions) − Σ cost(Down positions)
+//	+N means long Up by $N, −N means long Down by $N
+//	|netUSDC| ≤ MaxWindowRiskUSDC
 //
-//	BUY  N contracts at entry E, close at M: P&L = N × (M − E)
-//	SELL N contracts at entry E, close at M: P&L = N × (E − M)
-//	where N = SizeUSDC / E
+// A signal fires on every tick where edge ≥ threshold. If a position in the
+// same direction is already open, the new size is added (weighted-average entry
+// price) up to the budget limit. If a position in the opposite direction is
+// open, it is closed first at the last known mid (netting), then the new
+// position is opened.
+//
+// Settlement: at window end every remaining position is closed at 1.0 (ITM)
+// or 0.0 (OTM).  P&L = shares × (settlement − entryPrice).
 type PaperTrader struct {
-	strategy   *Strategy
-	windowLog  *csvlog.WindowWriter // may be nil
+	strategy  *Strategy
+	windowLog *csvlog.WindowWriter // may be nil
 
-	mu          sync.Mutex
-	pos         map[string]*paperPos
-	windowCost  float64
-	dailyPnL    float64
-	totalPnL    float64
-	currentDay  string // UTC date YYYY-MM-DD of the last closed window
+	mu         sync.Mutex
+	pos        map[string]*paperPos // tokenID → open position
+	warmup     bool                 // true during the first window — no orders placed
+	dailyPnL   float64
+	totalPnL   float64
+	currentDay string // UTC date YYYY-MM-DD
 }
 
 type paperPos struct {
 	outcome    string
-	side       Side
-	entryPrice float64
-	shares     float64
-	cost       float64
+	entryPrice float64 // weighted-average entry across all adds
+	shares     float64 // total contracts held
+	cost       float64 // total USDC spent
+	lastMid    float64 // most recent mid price; used when netting mid-window
 }
 
 func NewPaperTrader(p Params, wl *csvlog.WindowWriter) *PaperTrader {
@@ -46,25 +51,75 @@ func NewPaperTrader(p Params, wl *csvlog.WindowWriter) *PaperTrader {
 		strategy:   NewStrategy(p),
 		windowLog:  wl,
 		pos:        make(map[string]*paperPos),
+		warmup:     true,
 		currentDay: time.Now().UTC().Format("2006-01-02"),
 	}
 	metrics.PaperWindowRiskLimit.Set(p.MaxWindowRiskUSDC)
 	return pt
 }
 
-// OnTick updates unrealized P&L and position metrics, then evaluates the
-// strategy and paper-executes a signal if the risk budget allows.
+// netUSDC returns the current net position in USDC:
+//
+//	positive = long Up, negative = long Down
+func (pt *PaperTrader) netUSDC() float64 {
+	var net float64
+	for _, p := range pt.pos {
+		if p.outcome == "Up" {
+			net += p.cost
+		} else {
+			net -= p.cost
+		}
+	}
+	return net
+}
+
+func oppositeOutcome(o string) string {
+	if o == "Up" {
+		return "Down"
+	}
+	return "Up"
+}
+
+// OnTick updates unrealized P&L, then evaluates the strategy. A BUY signal
+// fires on every tick where edge ≥ threshold:
+//   - opposite position open → close it first (netting), then enter
+//   - same-direction position open → add to it (weighted avg entry) up to limit
+//   - no position → open fresh
 func (pt *PaperTrader) OnTick(snap Snapshot) {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 
+	pt.rollDayIfNeeded()
+
+	// Update lastMid and unrealized P&L. Close if edge has gone (take profit).
 	if p, ok := pt.pos[snap.TokenID]; ok {
+		p.lastMid = snap.MidPrice
 		metrics.PaperUnrealizedPnL.WithLabelValues(p.outcome).Set(pt.pnl(p, snap.MidPrice))
-		metrics.PaperPositionContracts.WithLabelValues(p.outcome).Set(pt.signedContracts(p))
+
+		if snap.Edge <= 0 {
+			realized := pt.pnl(p, snap.MidPrice)
+			pt.bookPnL(realized)
+			delete(pt.pos, snap.TokenID)
+
+			log.Printf("[paper] close %s @ %.4f (edge gone)  realized=%+.4f  daily=%+.4f",
+				p.outcome, snap.MidPrice, realized, pt.dailyPnL)
+
+			metrics.PaperWindowPnL.WithLabelValues(p.outcome).Set(realized)
+			metrics.PaperUnrealizedPnL.WithLabelValues(p.outcome).Set(0)
+			metrics.PaperPositionNetUSDC.Set(pt.netUSDC())
+			metrics.PaperTotalPnL.Set(pt.totalPnL)
+			metrics.PaperDailyPnL.Set(pt.dailyPnL)
+			return
+		}
 	}
 
-	sig := pt.strategy.Evaluate(snap)
-	if sig == nil {
+	if pt.warmup {
+		return // first window is observation-only
+	}
+
+	// Evaluate without the openOrders guard — paper trading fires every tick.
+	sig := pt.strategyEvalNoGuard(snap)
+	if sig == nil || sig.Side != Buy {
 		return
 	}
 
@@ -73,95 +128,156 @@ func (pt *PaperTrader) OnTick(snap Snapshot) {
 		return
 	}
 
-	size := sig.SizeUSDC
+	// Close any open position in the opposite direction before entering.
+	opp := oppositeOutcome(snap.Outcome)
+	for tid, p := range pt.pos {
+		if p.outcome != opp {
+			continue
+		}
+		closeAt := p.lastMid
+		if closeAt <= 0 {
+			closeAt = p.entryPrice
+		}
+		realized := pt.pnl(p, closeAt)
+		pt.bookPnL(realized)
+		delete(pt.pos, tid)
+
+		log.Printf("[paper] net flip: closed %s @ %.4f  realized=%+.4f  → opening %s",
+			p.outcome, closeAt, realized, snap.Outcome)
+
+		metrics.PaperWindowPnL.WithLabelValues(p.outcome).Set(realized)
+		metrics.PaperUnrealizedPnL.WithLabelValues(p.outcome).Set(0)
+		metrics.PaperTotalPnL.Set(pt.totalPnL)
+		metrics.PaperDailyPnL.Set(pt.dailyPnL)
+	}
+
+	// How much budget is left in this direction?
 	maxRisk := pt.strategy.params.MaxWindowRiskUSDC
+	currentNet := pt.netUSDC()
+	size := sig.SizeUSDC
+
 	if maxRisk > 0 {
-		remaining := maxRisk - pt.windowCost
-		if remaining <= 0 {
-			log.Printf("[paper] window risk budget exhausted (%.2f/%.2f USDC)", pt.windowCost, maxRisk)
-			return
+		var room float64
+		if snap.Outcome == "Up" {
+			room = maxRisk - currentNet
+		} else {
+			room = maxRisk + currentNet
 		}
-		if size > remaining {
-			size = remaining
+		if room < pt.strategy.params.MinSizeUSDC {
+			return // budget exhausted
 		}
-		if size < pt.strategy.params.MinSizeUSDC {
-			log.Printf("[paper] insufficient budget for min size (%.2f remaining)", remaining)
-			return
+		if size > room {
+			size = room
 		}
 	}
 
-	pos := &paperPos{
-		outcome:    snap.Outcome,
-		side:       sig.Side,
-		entryPrice: entry,
-		shares:     size / entry,
-		cost:       size,
+	newShares := size / entry
+
+	if existing, ok := pt.pos[snap.TokenID]; ok {
+		// Add to existing same-direction position; weighted-average entry price.
+		totalShares := existing.shares + newShares
+		existing.entryPrice = (existing.shares*existing.entryPrice + newShares*entry) / totalShares
+		existing.shares = totalShares
+		existing.cost += size
+		existing.lastMid = entry
+
+		log.Printf("[paper] ADD %s %.4f @ %.4f  +%.2f USDC  total_cost=%.2f  net=%.2f",
+			snap.Outcome, newShares, entry, size, existing.cost, pt.netUSDC())
+	} else {
+		pt.pos[snap.TokenID] = &paperPos{
+			outcome:    snap.Outcome,
+			entryPrice: entry,
+			shares:     newShares,
+			cost:       size,
+			lastMid:    entry,
+		}
+		log.Printf("[paper] BUY %s %.4f @ %.4f  cost=%.2f USDC  net=%.2f",
+			snap.Outcome, newShares, entry, size, pt.netUSDC())
 	}
-	pt.pos[snap.TokenID] = pos
-	pt.windowCost += size
-	pt.strategy.RecordOpen(snap.TokenID, "paper")
 
-	log.Printf("[paper] %s %s %.4f @ %.4f  cost=%.2f USDC  window=%.2f/%.2f",
-		sig.Side, snap.Outcome, pos.shares, entry, size, pt.windowCost, maxRisk)
-
-	metrics.PaperTradeEntryPrice.WithLabelValues(snap.Outcome, sig.Side.String()).Set(entry)
-	metrics.PaperTradeSize.WithLabelValues(snap.Outcome, sig.Side.String()).Set(size)
-	metrics.PaperTradesTotal.WithLabelValues(snap.Outcome, sig.Side.String()).Inc()
-	metrics.PaperPositionContracts.WithLabelValues(snap.Outcome).Set(pt.signedContracts(pos))
-	metrics.PaperWindowRiskUsed.Set(pt.windowCost)
+	metrics.PaperTradeEntryPrice.WithLabelValues(snap.Outcome, "BUY").Set(pt.pos[snap.TokenID].entryPrice)
+	metrics.PaperTradeSize.WithLabelValues(snap.Outcome, "BUY").Set(size)
+	metrics.PaperTradesTotal.WithLabelValues(snap.Outcome, "BUY").Inc()
+	metrics.PaperPositionNetUSDC.Set(pt.netUSDC())
 }
 
-// OnExpiry closes any open position for tokenID at finalMid, books P&L, and
-// returns a WindowRecord suitable for CSV logging. Always returns a record
-// (with zeros if no position was held) so every window is accounted for.
-func (pt *PaperTrader) OnExpiry(tokenID, outcome string, finalMid float64) csvlog.WindowRecord {
+// strategyEvalNoGuard runs the strategy without the "already open" check so
+// signals fire every tick while edge is sufficient.
+func (pt *PaperTrader) strategyEvalNoGuard(snap Snapshot) *TradeSignal {
+	if snap.Expiry.IsZero() || time.Until(snap.Expiry) < 30*time.Second {
+		return nil
+	}
+	p := pt.strategy.params
+	if snap.Spread > 3*p.EdgeThreshold {
+		return nil
+	}
+	if snap.MidPrice <= 0 {
+		return nil
+	}
+	absEdge := snap.Edge
+	if absEdge < 0 {
+		absEdge = -absEdge
+	}
+	if absEdge < p.EdgeThreshold {
+		return nil
+	}
+	// Only BUY signals — no real shorts on Polymarket.
+	if snap.Edge <= 0 {
+		return nil
+	}
+	return &TradeSignal{
+		TokenID:  snap.TokenID,
+		MarketID: snap.MarketID,
+		Outcome:  snap.Outcome,
+		Side:     Buy,
+		Price:    snap.MidPrice,
+		SizeUSDC: p.MaxSizeUSDC,
+		Expiry:   time.Now().Add(p.OrderTTL),
+		Edge:     snap.Edge,
+	}
+}
+
+// OnExpiry closes any open position for tokenID at settlementVal (0.0 or 1.0),
+// books P&L, and returns a WindowRecord. Always returns a record (zeros if flat).
+func (pt *PaperTrader) OnExpiry(tokenID, outcome string, settlementVal float64) csvlog.WindowRecord {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 
-	now := time.Now().UTC()
-	today := now.Format("2006-01-02")
-	if today != pt.currentDay {
-		pt.dailyPnL = 0
-		pt.currentDay = today
-		metrics.PaperDailyPnL.Set(0)
-	}
+	pt.rollDayIfNeeded()
 
 	rec := csvlog.WindowRecord{
-		ClosedAt: now,
-		Outcome:  outcome,
+		ClosedAt:        time.Now().UTC(),
+		Outcome:         outcome,
+		SettlementPrice: settlementVal,
 	}
 
 	p, ok := pt.pos[tokenID]
 	if !ok {
-		// No position held this window — write zero row.
 		rec.DailyPnL = pt.dailyPnL
 		rec.TotalPnL = pt.totalPnL
 		metrics.PaperUnrealizedPnL.WithLabelValues(outcome).Set(0)
-		metrics.PaperPositionContracts.WithLabelValues(outcome).Set(0)
 		pt.writeWindow(rec)
 		return rec
 	}
 
-	realized := pt.pnl(p, finalMid)
-	pt.dailyPnL += realized
-	pt.totalPnL += realized
+	realized := pt.pnl(p, settlementVal)
+	pt.bookPnL(realized)
 	delete(pt.pos, tokenID)
 
-	rec.Side = p.side.String()
+	rec.Side = "BUY"
 	rec.EntryPrice = p.entryPrice
-	rec.ExitPrice = finalMid
-	rec.Contracts = pt.signedContracts(p)
+	rec.Shares = p.shares
 	rec.CostUSDC = p.cost
 	rec.RealizedPnL = realized
 	rec.DailyPnL = pt.dailyPnL
 	rec.TotalPnL = pt.totalPnL
 
-	log.Printf("[paper] closed %s @ %.4f  realized=%+.4f  daily=%+.4f  total=%+.4f",
-		outcome, finalMid, realized, pt.dailyPnL, pt.totalPnL)
+	log.Printf("[paper] settled %s @ %.0f  realized=%+.4f  daily=%+.4f  total=%+.4f",
+		outcome, settlementVal, realized, pt.dailyPnL, pt.totalPnL)
 
 	metrics.PaperWindowPnL.WithLabelValues(outcome).Set(realized)
 	metrics.PaperUnrealizedPnL.WithLabelValues(outcome).Set(0)
-	metrics.PaperPositionContracts.WithLabelValues(outcome).Set(0)
+	metrics.PaperPositionNetUSDC.Set(pt.netUSDC())
 	metrics.PaperTotalPnL.Set(pt.totalPnL)
 	metrics.PaperDailyPnL.Set(pt.dailyPnL)
 
@@ -169,13 +285,34 @@ func (pt *PaperTrader) OnExpiry(tokenID, outcome string, finalMid float64) csvlo
 	return rec
 }
 
-// OnNewWindow resets the per-window risk budget. Call when a new 5-minute
-// window is discovered and the token list is replaced.
+// OnNewWindow resets all open positions (they should have been expired already).
+// Call when a new 5-minute window is discovered and the token list is replaced.
 func (pt *PaperTrader) OnNewWindow() {
 	pt.mu.Lock()
-	pt.windowCost = 0
+	if pt.warmup {
+		pt.warmup = false
+		log.Println("[paper] warmup complete — orders enabled from next window")
+	}
+	pt.pos = make(map[string]*paperPos)
 	pt.mu.Unlock()
+	metrics.PaperPositionNetUSDC.Set(0)
 	metrics.PaperWindowRiskUsed.Set(0)
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func (pt *PaperTrader) bookPnL(realized float64) {
+	pt.dailyPnL += realized
+	pt.totalPnL += realized
+}
+
+func (pt *PaperTrader) rollDayIfNeeded() {
+	today := time.Now().UTC().Format("2006-01-02")
+	if today != pt.currentDay {
+		pt.dailyPnL = 0
+		pt.currentDay = today
+		metrics.PaperDailyPnL.Set(0)
+	}
 }
 
 func (pt *PaperTrader) writeWindow(r csvlog.WindowRecord) {
@@ -188,15 +325,7 @@ func (pt *PaperTrader) writeWindow(r csvlog.WindowRecord) {
 }
 
 func (pt *PaperTrader) pnl(p *paperPos, currentMid float64) float64 {
-	if p.side == Buy {
-		return p.shares * (currentMid - p.entryPrice)
-	}
-	return p.shares * (p.entryPrice - currentMid)
+	return p.shares * (currentMid - p.entryPrice)
 }
 
-func (pt *PaperTrader) signedContracts(p *paperPos) float64 {
-	if p.side == Buy {
-		return p.shares
-	}
-	return -p.shares
-}
+var _ = math.Abs // used in netUSDC room calculation
