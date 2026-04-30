@@ -67,6 +67,13 @@ var (
 		Help: "Total number of errors polling Polymarket",
 	}, []string{"outcome"})
 
+	// Effective annualised volatility used for Black-Scholes pricing.
+	// Reflects the rolling Binance estimate when enabled, otherwise static --sigma.
+	SigmaCurrent = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "polymarket_sigma",
+		Help: "Effective annualised volatility σ used for Black-Scholes pricing",
+	})
+
 	// ── paper trading ──────────────────────────────────────────────────────────
 
 	PaperTradeEntryPrice = promauto.NewGaugeVec(prometheus.GaugeOpts{

@@ -51,13 +51,41 @@
       ]
     },
     {
+      "id": 15,
+      "type": "stat",
+      "title": "Effective σ (volatility)",
+      "description": "Annualised volatility used for Black-Scholes. Rolling Binance estimate when available, otherwise static --sigma.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_sigma",
+          "legendFormat": "σ"
+        }
+      ]
+    },
+    {
       "id": 2,
       "type": "timeseries",
       "title": "Market Price vs Fair Price (Black-Scholes)",
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
+        "w": 18,
+        "x": 6,
         "y": 8
       },
       "targets": [

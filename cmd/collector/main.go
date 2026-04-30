@@ -30,7 +30,8 @@ import (
 func main() {
 	list := flag.Bool("list", false, "Print active BTC markets and exit")
 	discoverWindow := flag.Duration("discover-window", 1*time.Hour, "Track markets expiring within this window")
-	sigma := flag.Float64("sigma", 0.20, "Annualised volatility σ for Black-Scholes")
+	sigma := flag.Float64("sigma", 0.20, "Annualised volatility σ for Black-Scholes (fallback when --sigma-window=0 or insufficient data)")
+	sigmaWindow := flag.Duration("sigma-window", 5*time.Minute, "Rolling window for σ estimation from Binance prices (0 = use static --sigma)")
 	metricsAddr := flag.String("metrics", ":9100", "Prometheus /metrics listen address")
 	csvDir := flag.String("csv", "data", "Directory for CSV output files")
 	pollInterval := flag.Duration("poll", 4*time.Second, "Order book polling interval")
@@ -81,6 +82,21 @@ func main() {
 		return // context cancelled
 	}
 	log.Printf("[btcprice] spot=%.2f", spot)
+
+	// Rolling volatility feed (always uses Binance regardless of --btc-source).
+	var rollingVol *btcprice.RollingVol
+	if *sigmaWindow > 0 {
+		var volFeed btcprice.Source
+		if *btcSource == "binance" {
+			volFeed = priceFeed // reuse the existing Binance feed
+		} else {
+			volFeed = btcprice.NewFeed(cfg.BinanceWSURL, cfg.BinancePair)
+			go volFeed.Run(ctx)
+		}
+		rollingVol = btcprice.NewRollingVol(volFeed, *sigmaWindow)
+		go rollingVol.Run(ctx)
+	}
+	metrics.SigmaCurrent.Set(*sigma)
 
 	// Discover the current 5-minute BTC market pair.
 	cfg.MarketTokenIDs = discoverAndLoadMeta(gammaClient, spot)
@@ -199,6 +215,15 @@ func main() {
 			currentSpot := priceFeed.Price()
 			metrics.BTCSpotPrice.Set(currentSpot)
 
+			// Use rolling Binance vol when available, fall back to static --sigma.
+			effectiveSigma := cfg.Volatility
+			if rollingVol != nil {
+				if s := rollingVol.Sigma(); s > 0 {
+					effectiveSigma = s
+					metrics.SigmaCurrent.Set(s)
+				}
+			}
+
 			now := time.Now()
 			var active []string
 			for _, tokenID := range cfg.MarketTokenIDs {
@@ -212,7 +237,7 @@ func main() {
 					continue
 				}
 				active = append(active, tokenID)
-				snap, err := pollToken(pmClient, csvWriter, tokenID, currentSpot, cfg.Volatility)
+				snap, err := pollToken(pmClient, csvWriter, tokenID, currentSpot, effectiveSigma)
 				if err != nil {
 					log.Printf("[collector] token %.8s: %v", tokenID, err)
 					metrics.PollErrors.WithLabelValues(marketMeta[tokenID].Outcome).Inc()
