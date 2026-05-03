@@ -32,6 +32,9 @@ func main() {
 	discoverWindow := flag.Duration("discover-window", 1*time.Hour, "Track markets expiring within this window")
 	sigma := flag.Float64("sigma", 0.20, "Annualised volatility σ for Black-Scholes (fallback when --sigma-window=0 or insufficient data)")
 	sigmaWindow := flag.Duration("sigma-window", 5*time.Minute, "Rolling window for σ estimation from Binance prices (0 = use static --sigma)")
+	execDelay        := flag.Duration("exec-delay", 150*time.Millisecond, "Simulated order execution latency for paper trading (0 to disable)")
+	paperOrderSize   := flag.Float64("paper-order-size", 20, "Max USDC per individual buy tick in paper trading")
+	paperMaxRisk     := flag.Float64("paper-max-risk", 100, "Max net position in USDC per 5-minute window in paper trading")
 	metricsAddr := flag.String("metrics", ":9100", "Prometheus /metrics listen address")
 	csvDir := flag.String("csv", "data", "Directory for CSV output files")
 	pollInterval := flag.Duration("poll", 4*time.Second, "Order book polling interval")
@@ -98,8 +101,22 @@ func main() {
 	}
 	metrics.SigmaCurrent.Set(*sigma)
 
+	// strikeFn resolves the ATM strike for a given window-open time.
+	// When the price feed is Chainlink we look up the historical reading closest
+	// to the window-open timestamp; otherwise we fall back to current spot.
+	type historicalPricer interface{ PriceAt(time.Time) float64 }
+	strikeFn := func(t time.Time) float64 {
+		if hp, ok := priceFeed.(historicalPricer); ok {
+			if p := hp.PriceAt(t); p > 0 {
+				return p
+			}
+			log.Printf("[btcprice] no chainlink reading near %s, using current spot", t.Format("15:04:05Z"))
+		}
+		return priceFeed.Price()
+	}
+
 	// Discover the current 5-minute BTC market pair.
-	cfg.MarketTokenIDs = discoverAndLoadMeta(gammaClient, spot)
+	cfg.MarketTokenIDs = discoverAndLoadMeta(gammaClient, strikeFn)
 	if len(cfg.MarketTokenIDs) == 0 {
 		log.Fatal("[discover] no active BTC 5m market found")
 	}
@@ -153,11 +170,11 @@ func main() {
 	if !cfg.Trading.Enabled {
 		paperTrader = trader.NewPaperTrader(trader.Params{
 			EdgeThreshold:     cfg.Trading.EdgeThreshold,
-			MaxSizeUSDC:       20,   // max USDC per individual buy tick
+			MaxSizeUSDC:       *paperOrderSize,
 			MinSizeUSDC:       1,
 			PriceOffset:       cfg.Trading.PriceOffset,
 			OrderTTL:          cfg.Trading.OrderTTL,
-			MaxWindowRiskUSDC: 100, // total net position limit per window
+			MaxWindowRiskUSDC: *paperMaxRisk,
 		}, windowLog)
 	}
 
@@ -191,7 +208,7 @@ func main() {
 
 		case <-rediscoverTimer.C:
 			currentSpot := priceFeed.Price()
-			newIDs := discoverAndLoadMeta(gammaClient, currentSpot)
+			newIDs := discoverAndLoadMeta(gammaClient, strikeFn)
 			if len(newIDs) > 0 {
 				// Close paper positions on outgoing tokens, then reset the window budget.
 				if paperTrader != nil {
@@ -247,7 +264,12 @@ func main() {
 					maybeExecute(strategy, tradeClient, *snap)
 				}
 				if paperTrader != nil {
-					paperTrader.OnTick(*snap)
+					snapCopy := *snap
+					if *execDelay > 0 {
+						time.AfterFunc(*execDelay, func() { paperTrader.OnTick(snapCopy) })
+					} else {
+						paperTrader.OnTick(snapCopy)
+					}
 				}
 			}
 			cfg.MarketTokenIDs = active
@@ -272,8 +294,8 @@ type tokenMeta struct {
 
 // discoverAndLoadMeta fetches the current 5-minute BTC market pair,
 // populates marketMeta, and returns [upTokenID, downTokenID].
-// spot is recorded as the ATM strike (BTC price at window open).
-func discoverAndLoadMeta(gc *gamma.Client, spot float64) []string {
+// strikeFn is called with the window-open time to get the ATM strike.
+func discoverAndLoadMeta(gc *gamma.Client, strikeFn func(time.Time) float64) []string {
 	m, err := gc.Current5m()
 	if err != nil {
 		log.Printf("[discover] gamma error: %v", err)
@@ -284,6 +306,17 @@ func discoverAndLoadMeta(gc *gamma.Client, spot float64) []string {
 		return nil
 	}
 
+	// Strike = Polymarket's opening price (Chainlink Data Streams) fetched from the
+	// event page RSC payload — this is the exact value used for settlement.
+	// Falls back to on-chain Chainlink historical block call, then current spot.
+	strike := gc.FetchOpenPrice(m.Slug)
+	if strike > 0 {
+		log.Printf("[discover] strike=%.2f (source: polymarket RSC)", strike)
+	} else {
+		strike = strikeFn(slugOpenTime(m.Slug))
+		log.Printf("[discover] strike=%.2f (source: chainlink fallback)", strike)
+	}
+
 	for _, entry := range []struct {
 		tokenID string
 		outcome string
@@ -291,9 +324,7 @@ func discoverAndLoadMeta(gc *gamma.Client, spot float64) []string {
 		{m.UpTokenID, "Up"},
 		{m.DownTokenID, "Down"},
 	} {
-		// Delete the old MarketInfo series for this outcome before registering the new one.
 		if old, ok := marketMeta[entry.tokenID]; !ok {
-			// Different token (new window): delete any old info series for this outcome.
 			for oldTokenID, oldMeta := range marketMeta {
 				if oldMeta.Outcome == entry.outcome {
 					metrics.MarketInfo.DeleteLabelValues(entry.outcome, oldTokenID, oldMeta.MarketID)
@@ -306,16 +337,29 @@ func discoverAndLoadMeta(gc *gamma.Client, spot float64) []string {
 		marketMeta[entry.tokenID] = tokenMeta{
 			MarketID: m.ConditionID,
 			Outcome:  entry.outcome,
-			Strike:   spot,
+			Strike:   strike,
 			Expiry:   m.EndDate,
 		}
 		metrics.MarketInfo.WithLabelValues(entry.outcome, entry.tokenID, m.ConditionID).Set(1)
 	}
 
-	log.Printf("[discover] %s  exp=%s  K=%.2f",
-		m.Question, m.EndDate.Format("15:04:05Z"), spot)
+	log.Printf("[discover] %s  exp=%s  K=%.2f", m.Question, m.EndDate.Format("15:04:05Z"), strike)
 
 	return []string{m.UpTokenID, m.DownTokenID}
+}
+
+// slugOpenTime extracts the window-open Unix timestamp from a slug like
+// "btc-updown-5m-1234567890" and returns the corresponding time.
+func slugOpenTime(slug string) time.Time {
+	parts := strings.Split(slug, "-")
+	if len(parts) == 0 {
+		return time.Time{}
+	}
+	ts, err := strconv.ParseInt(parts[len(parts)-1], 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(ts, 0)
 }
 
 // ── poll loop ─────────────────────────────────────────────────────────────────
@@ -397,6 +441,8 @@ func pollToken(
 		MarketID:  meta.MarketID,
 		Outcome:   meta.Outcome,
 		MidPrice:  mid,
+		BestBid:   bid,
+		BestAsk:   ask,
 		FairPrice: fair,
 		Edge:      edge,
 		Spread:    spread,

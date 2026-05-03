@@ -11,6 +11,7 @@ import (
 )
 
 const baseURL = "https://gamma-api.polymarket.com"
+const polymarketBase = "https://polymarket.com"
 
 // MarketInfo holds the resolved data for one BTC up/down market window.
 type MarketInfo struct {
@@ -181,6 +182,105 @@ func parseEndDate(raw, slug string) time.Time {
 	}
 	log.Printf("[gamma] warning: could not parse endDate %q and slug fallback failed", raw)
 	return time.Time{}
+}
+
+// FetchOpenPrice retrieves the Chainlink Data Streams opening price for the
+// given slug by fetching the Polymarket event page's React Server Component
+// (RSC) payload. This is the exact price Polymarket uses to settle the market.
+// Returns 0 on any error (caller should fall back to other sources).
+func (c *Client) FetchOpenPrice(slug string) float64 {
+	url := fmt.Sprintf("%s/event/%s", polymarketBase, slug)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return 0
+	}
+	// Do NOT set Accept-Encoding manually — http.Transport adds it automatically
+	// and handles transparent gzip decompression.
+	req.Header.Set("RSC", "1")
+	req.Header.Set("Next-Url", "/event/"+slug)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		log.Printf("[gamma] FetchOpenPrice %s: %v", slug, err)
+		return 0
+	}
+	defer resp.Body.Close()
+
+	buf := make([]byte, 0, 256*1024)
+	tmp := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(tmp)
+		buf = append(buf, tmp[:n]...)
+		if rerr != nil {
+			break
+		}
+		if len(buf) > 4*1024*1024 {
+			break // safety cap
+		}
+	}
+
+	windowStart := slugOpenTimeISO(slug)
+	p := extractOpenPrice(string(buf), windowStart)
+	if p == 0 {
+		log.Printf("[gamma] FetchOpenPrice %s: openPrice not found in RSC payload (windowStart=%s)", slug, windowStart)
+	}
+	return p
+}
+
+// slugOpenTimeISO returns the ISO-8601 UTC timestamp for the window open time
+// encoded in a slug like "btc-updown-5m-1234567890".
+func slugOpenTimeISO(slug string) string {
+	parts := strings.Split(slug, "-")
+	if len(parts) == 0 {
+		return ""
+	}
+	ts, err := strconv.ParseInt(parts[len(parts)-1], 10, 64)
+	if err != nil {
+		return ""
+	}
+	return time.Unix(ts, 0).UTC().Format("2006-01-02T15:04:05Z")
+}
+
+// extractOpenPrice parses the RSC payload for a crypto-prices query whose
+// queryKey contains windowStart and returns the openPrice field.
+func extractOpenPrice(body, windowStart string) float64 {
+	if windowStart == "" {
+		return 0
+	}
+	// We search for a "openPrice" value near a queryKey that contains windowStart.
+	// The RSC payload contains JSON fragments like:
+	//   {"openPrice":78738.84,"closePrice":null}
+	//   ...
+	//   "queryKey":["crypto-prices","price","BTC","<windowStart>","fiveminute","<windowEnd>"]
+	//
+	// Strategy: find the queryKey position, then look backwards for openPrice.
+	searchKey := `"crypto-prices","price","BTC","` + windowStart + `"`
+	idx := strings.Index(body, searchKey)
+	if idx < 0 {
+		return 0
+	}
+	// Look backwards up to 800 bytes for "openPrice"
+	start := idx - 800
+	if start < 0 {
+		start = 0
+	}
+	region := body[start:idx]
+	opIdx := strings.LastIndex(region, `"openPrice":`)
+	if opIdx < 0 {
+		return 0
+	}
+	raw := region[opIdx+len(`"openPrice":`):]
+	// Read digits until non-numeric
+	end := 0
+	for end < len(raw) && (raw[end] == '.' || (raw[end] >= '0' && raw[end] <= '9')) {
+		end++
+	}
+	v, err := strconv.ParseFloat(raw[:end], 64)
+	if err != nil || v == 0 {
+		return 0
+	}
+	return v
 }
 
 // ── raw API types ─────────────────────────────────────────────────────────────

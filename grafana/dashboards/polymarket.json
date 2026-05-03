@@ -26,49 +26,20 @@
       ]
     },
     {
-      "id": 5,
-      "type": "stat",
-      "title": "Time to Expiry",
+      "id": 15,
+      "type": "timeseries",
+      "title": "Effective σ (volatility)",
+      "description": "Annualised volatility used for Black-Scholes. Rolling Binance estimate when available, otherwise static --sigma.",
       "gridPos": {
-        "h": 4,
+        "h": 6,
         "w": 12,
         "x": 12,
         "y": 0
       },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "unit": "s"
-      },
-      "targets": [
-        {
-          "expr": "polymarket_time_to_expiry_seconds",
-          "legendFormat": "{{outcome}}"
-        }
-      ]
-    },
-    {
-      "id": 15,
-      "type": "stat",
-      "title": "Effective σ (volatility)",
-      "description": "Annualised volatility used for Black-Scholes. Rolling Binance estimate when available, otherwise static --sigma.",
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 0,
-        "y": 8
-      },
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"] },
-        "colorMode": "value"
-      },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
-          "decimals": 3
+          "unit": "none",
+          "decimals": 4
         }
       },
       "targets": [
@@ -84,9 +55,9 @@
       "title": "Market Price vs Fair Price (Black-Scholes)",
       "gridPos": {
         "h": 8,
-        "w": 18,
-        "x": 6,
-        "y": 8
+        "w": 24,
+        "x": 0,
+        "y": 6
       },
       "targets": [
         {
@@ -107,7 +78,7 @@
         "h": 6,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 14
       },
       "fieldConfig": {
         "defaults": {
@@ -145,7 +116,7 @@
         "h": 6,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 14
       },
       "targets": [
         {
@@ -163,39 +134,15 @@
       ]
     },
     {
-      "id": 6,
-      "type": "stat",
-      "title": "Strike Price (ATM)",
-      "gridPos": {
-        "h": 4,
-        "w": 12,
-        "x": 12,
-        "y": 4
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "targets": [
-        {
-          "expr": "polymarket_strike",
-          "legendFormat": "K {{outcome}}"
-        }
-      ]
-    },
-    {
       "id": 14,
       "type": "timeseries",
-      "title": "Paper Trading \u2014 Cumulative Daily P&L",
+      "title": "Paper Trading — Cumulative Daily P&L",
       "description": "Running P&L from midnight UTC today. Resets to 0 at each new calendar day.",
       "gridPos": {
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -233,13 +180,13 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Paper Trading \u2014 Unrealized P&L",
+      "title": "Paper Trading — Unrealized P&L",
       "description": "Mark-to-market P&L of open paper positions, updated each poll tick. Resets to 0 when the window closes.",
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 29
+        "y": 27
       },
       "fieldConfig": {
         "defaults": {
@@ -273,13 +220,13 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Paper Trading \u2014 Realized P&L per Window",
+      "title": "Paper Trading — Realized P&L per Window",
       "description": "P&L booked when each 5-minute window closes (marked-to-market at last mid price).",
       "gridPos": {
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 29
+        "y": 27
       },
       "fieldConfig": {
         "defaults": {
@@ -313,13 +260,13 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Paper Trading \u2014 Net Position (USDC)",
-      "description": "Net position in USDC: +N = long Up by $N, \u2212N = long Down by $N, 0 = flat. |net| \u2264 $100.",
+      "title": "Paper Trading — Net Position (USDC)",
+      "description": "Net position in USDC: +N = long Up by $N, −N = long Down by $N, 0 = flat. |net| ≤ $100.",
       "gridPos": {
         "h": 5,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 34
       },
       "fieldConfig": {
         "defaults": {
@@ -353,13 +300,13 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Paper Trading \u2014 Window Risk Budget",
+      "title": "Paper Trading — Window Risk Budget",
       "description": "USDC committed vs. the $100 limit for the current 5-minute window.",
       "gridPos": {
         "h": 5,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 34
       },
       "fieldConfig": {
         "defaults": {
@@ -380,12 +327,12 @@
     {
       "id": 9,
       "type": "stat",
-      "title": "Paper Trading \u2014 Cumulative P&L",
+      "title": "Paper Trading — Cumulative P&L",
       "gridPos": {
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 41
+        "y": 39
       },
       "options": {
         "reduceOptions": {
@@ -423,12 +370,12 @@
     {
       "id": 10,
       "type": "stat",
-      "title": "Paper Trading \u2014 Entry Prices",
+      "title": "Paper Trading — Entry Prices",
       "gridPos": {
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 41
+        "y": 39
       },
       "options": {
         "reduceOptions": {
@@ -447,12 +394,12 @@
     {
       "id": 11,
       "type": "stat",
-      "title": "Paper Trading \u2014 Trade Count",
+      "title": "Paper Trading — Trade Count",
       "gridPos": {
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 41
+        "y": 39
       },
       "options": {
         "reduceOptions": {

@@ -8,14 +8,16 @@ import (
 
 // Snapshot is the market state passed to the strategy each poll cycle.
 type Snapshot struct {
-	TokenID  string
-	MarketID string
-	Outcome  string
-	MidPrice float64
+	TokenID   string
+	MarketID  string
+	Outcome   string
+	MidPrice  float64
+	BestBid   float64 // best bid; used as mark-to-market exit price for long positions
+	BestAsk   float64
 	FairPrice float64
-	Edge     float64 // fair - mid; positive = underpriced YES
-	Spread   float64
-	Expiry   time.Time
+	Edge      float64 // fair - mid; positive = underpriced YES
+	Spread    float64
+	Expiry    time.Time
 }
 
 // Params controls the simple edge strategy.
@@ -79,19 +81,18 @@ func (s *Strategy) Evaluate(snap Snapshot) *TradeSignal {
 		return nil
 	}
 
-	var side Side
-	var price float64
-	if snap.Edge > 0 {
-		// YES is underpriced → BUY at mid - offset (passive)
-		side = Buy
-		price = snap.MidPrice - s.params.PriceOffset
-	} else {
-		// YES is overpriced → SELL at mid + offset (passive)
-		side = Sell
-		price = snap.MidPrice + s.params.PriceOffset
+	if snap.FairPrice <= 0 {
+		return nil
 	}
 
-	// Clamp price to [0.01, 0.99]
+	var side Side
+	if snap.Edge > 0 {
+		side = Buy
+	} else {
+		side = Sell
+	}
+	// Maker order at fair price: rests on the book, never crosses the spread.
+	price := snap.FairPrice
 	if price < 0.01 {
 		price = 0.01
 	}

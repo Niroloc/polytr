@@ -43,7 +43,7 @@ type paperPos struct {
 	entryPrice float64 // weighted-average entry across all adds
 	shares     float64 // total contracts held
 	cost       float64 // total USDC spent
-	lastMid    float64 // most recent mid price; used when netting mid-window
+	lastBid    float64 // most recent ask price; used for mark-to-market and mid-window close
 }
 
 func NewPaperTrader(p Params, wl *csvlog.WindowWriter) *PaperTrader {
@@ -91,20 +91,26 @@ func (pt *PaperTrader) OnTick(snap Snapshot) {
 
 	pt.rollDayIfNeeded()
 
-	// Update lastMid and unrealized P&L. Close if edge has gone (take profit).
+	// Update lastBid and unrealized P&L (marked at ask — the price we can sell at).
 	if p, ok := pt.pos[snap.TokenID]; ok {
-		p.lastMid = snap.MidPrice
-		metrics.PaperUnrealizedPnL.WithLabelValues(p.outcome).Set(pt.pnl(p, snap.MidPrice))
+		p.lastBid = snap.BestBid
+		unrealized := pt.pnl(p, snap.BestBid)
+		metrics.PaperUnrealizedPnL.WithLabelValues(p.outcome).Set(unrealized)
 
-		if snap.Edge <= 0 {
-			realized := pt.pnl(p, snap.MidPrice)
-			pt.bookPnL(realized)
+		// Close threshold: take profit as soon as edge is gone (<=0);
+		// cut a loss only when edge exceeds 1.5× the entry threshold against us.
+		closeEdge := 0.0
+		if unrealized < 0 {
+			closeEdge = -1.5 * pt.strategy.params.EdgeThreshold
+		}
+		if snap.Edge <= closeEdge {
+			pt.bookPnL(unrealized)
 			delete(pt.pos, snap.TokenID)
 
-			log.Printf("[paper] close %s @ %.4f (edge gone)  realized=%+.4f  daily=%+.4f",
-				p.outcome, snap.MidPrice, realized, pt.dailyPnL)
+			log.Printf("[paper] close %s @ %.4f ask (edge=%.4f thr=%.4f)  realized=%+.4f  daily=%+.4f",
+				p.outcome, snap.BestBid, snap.Edge, closeEdge, unrealized, pt.dailyPnL)
 
-			metrics.PaperWindowPnL.WithLabelValues(p.outcome).Set(realized)
+			metrics.PaperWindowPnL.WithLabelValues(p.outcome).Set(unrealized)
 			metrics.PaperUnrealizedPnL.WithLabelValues(p.outcome).Set(0)
 			metrics.PaperPositionNetUSDC.Set(pt.netUSDC())
 			metrics.PaperTotalPnL.Set(pt.totalPnL)
@@ -123,7 +129,8 @@ func (pt *PaperTrader) OnTick(snap Snapshot) {
 		return
 	}
 
-	entry := snap.MidPrice
+	// Maker order: simulate fill at fair price (our limit bid).
+	entry := snap.FairPrice
 	if entry <= 0 {
 		return
 	}
@@ -134,7 +141,7 @@ func (pt *PaperTrader) OnTick(snap Snapshot) {
 		if p.outcome != opp {
 			continue
 		}
-		closeAt := p.lastMid
+		closeAt := p.lastBid
 		if closeAt <= 0 {
 			closeAt = p.entryPrice
 		}
@@ -142,7 +149,7 @@ func (pt *PaperTrader) OnTick(snap Snapshot) {
 		pt.bookPnL(realized)
 		delete(pt.pos, tid)
 
-		log.Printf("[paper] net flip: closed %s @ %.4f  realized=%+.4f  → opening %s",
+		log.Printf("[paper] net flip: closed %s @ %.4f ask  realized=%+.4f  → opening %s",
 			p.outcome, closeAt, realized, snap.Outcome)
 
 		metrics.PaperWindowPnL.WithLabelValues(p.outcome).Set(realized)
@@ -179,9 +186,9 @@ func (pt *PaperTrader) OnTick(snap Snapshot) {
 		existing.entryPrice = (existing.shares*existing.entryPrice + newShares*entry) / totalShares
 		existing.shares = totalShares
 		existing.cost += size
-		existing.lastMid = entry
+		existing.lastBid = snap.BestBid
 
-		log.Printf("[paper] ADD %s %.4f @ %.4f  +%.2f USDC  total_cost=%.2f  net=%.2f",
+		log.Printf("[paper] ADD %s %.4f @ %.4f fair  +%.2f USDC  total_cost=%.2f  net=%.2f",
 			snap.Outcome, newShares, entry, size, existing.cost, pt.netUSDC())
 	} else {
 		pt.pos[snap.TokenID] = &paperPos{
@@ -189,9 +196,9 @@ func (pt *PaperTrader) OnTick(snap Snapshot) {
 			entryPrice: entry,
 			shares:     newShares,
 			cost:       size,
-			lastMid:    entry,
+			lastBid:    snap.BestBid,
 		}
-		log.Printf("[paper] BUY %s %.4f @ %.4f  cost=%.2f USDC  net=%.2f",
+		log.Printf("[paper] BUY %s %.4f @ %.4f fair  cost=%.2f USDC  net=%.2f",
 			snap.Outcome, newShares, entry, size, pt.netUSDC())
 	}
 
@@ -211,7 +218,7 @@ func (pt *PaperTrader) strategyEvalNoGuard(snap Snapshot) *TradeSignal {
 	if snap.Spread > 3*p.EdgeThreshold {
 		return nil
 	}
-	if snap.MidPrice <= 0 {
+	if snap.MidPrice <= 0 || snap.FairPrice <= 0 {
 		return nil
 	}
 	absEdge := snap.Edge
@@ -230,7 +237,7 @@ func (pt *PaperTrader) strategyEvalNoGuard(snap Snapshot) *TradeSignal {
 		MarketID: snap.MarketID,
 		Outcome:  snap.Outcome,
 		Side:     Buy,
-		Price:    snap.MidPrice,
+		Price:    snap.FairPrice, // maker limit at fair value
 		SizeUSDC: p.MaxSizeUSDC,
 		Expiry:   time.Now().Add(p.OrderTTL),
 		Edge:     snap.Edge,

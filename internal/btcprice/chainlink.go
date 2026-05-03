@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,11 +22,73 @@ import (
 // Multiple RPC endpoints are tried in round-robin order; on any error the feed
 // rotates to the next endpoint so a single overloaded node doesn't stall pricing.
 type chainlinkFeed struct {
-	mu     sync.Mutex
-	price  float64
-	urls   []string // candidate RPC endpoints
-	urlIdx int      // index of the currently active endpoint
-	client *http.Client
+	mu           sync.Mutex
+	price        float64
+	urls         []string // candidate RPC endpoints
+	urlIdx       int      // index of the currently active endpoint
+	client       *http.Client
+	history      []priceRecord // recent readings for historical lookup
+	refBlockNum  uint64        // latest known Polygon block number
+	refBlockTime time.Time     // wall-clock time when refBlockNum was recorded
+}
+
+type priceRecord struct {
+	t  time.Time
+	px float64
+}
+
+// maxHistory covers 6 minutes at 3-second polling cadence.
+const maxHistory = 120
+
+// PriceAt returns the Chainlink price at (or nearest to) time t.
+//
+// Fast path: scan the local history ring buffer (±30 s tolerance).
+// Slow path: if the history miss, estimate the Polygon block at time t from our
+// most recent block reference and call latestAnswer() at that block. This covers
+// the case where the collector started after the window opened.
+func (f *chainlinkFeed) PriceAt(t time.Time) float64 {
+	f.mu.Lock()
+	var best float64
+	bestDiff := time.Duration(1<<63 - 1)
+	for _, r := range f.history {
+		d := r.t.Sub(t)
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDiff {
+			bestDiff = d
+			best = r.px
+		}
+	}
+	refBlock := f.refBlockNum
+	refTime := f.refBlockTime
+	url := f.urls[f.urlIdx]
+	f.mu.Unlock()
+
+	if bestDiff <= 30*time.Second {
+		return best
+	}
+
+	// Fall back to a historical eth_call at the estimated block.
+	if refBlock == 0 || refTime.IsZero() {
+		return 0
+	}
+	// Polygon averages ~2.3 s per block.
+	const polygonBlockSec = 2.3
+	diffSec := refTime.Sub(t).Seconds()
+	blocksBack := int64(diffSec / polygonBlockSec)
+	targetBlock := int64(refBlock) - blocksBack
+	if targetBlock <= 0 {
+		return 0
+	}
+	blockHex := fmt.Sprintf("0x%x", targetBlock)
+	p, err := f.latestAnswerAt(url, blockHex)
+	if err != nil {
+		log.Printf("[btcprice] chainlink historical block %s: %v", blockHex, err)
+		return 0
+	}
+	log.Printf("[btcprice] chainlink historical K=%.2f at block %s (Δblocks=%d)", p, blockHex, blocksBack)
+	return p
 }
 
 const (
@@ -115,16 +178,59 @@ func (f *chainlinkFeed) fetch() {
 			f.mu.Unlock()
 			continue
 		}
+		now := time.Now()
+		blockNum, _ := f.getBlockNumber(f.urls[idx])
 		f.mu.Lock()
 		f.price = p
 		f.urlIdx = idx // stick with the working endpoint
+		f.history = append(f.history, priceRecord{t: now, px: p})
+		if len(f.history) > maxHistory {
+			f.history = f.history[1:]
+		}
+		if blockNum > 0 {
+			f.refBlockNum = blockNum
+			f.refBlockTime = now
+		}
 		f.mu.Unlock()
 		return
 	}
 }
 
+// getBlockNumber returns the current block number from the RPC.
+func (f *chainlinkFeed) getBlockNumber(rpcURL string) (uint64, error) {
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "eth_blockNumber",
+		"params":  []any{},
+		"id":      2,
+	})
+	resp, err := f.client.Post(rpcURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var rpcResp struct {
+		Result string `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return 0, err
+	}
+	raw := strings.TrimPrefix(rpcResp.Result, "0x")
+	n, err := strconv.ParseUint(raw, 16, 64)
+	return n, err
+}
+
+// latestAnswerAt calls latestAnswer() at a specific block (hex string, e.g. "0x1a2b3c").
+func (f *chainlinkFeed) latestAnswerAt(rpcURL, blockHex string) (float64, error) {
+	return f.callLatestAnswer(rpcURL, blockHex)
+}
+
 // latestAnswer calls latestAnswer() on the Chainlink aggregator via eth_call.
 func (f *chainlinkFeed) latestAnswer(rpcURL string) (float64, error) {
+	return f.callLatestAnswer(rpcURL, "latest")
+}
+
+func (f *chainlinkFeed) callLatestAnswer(rpcURL, block string) (float64, error) {
 	body, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "eth_call",
@@ -133,7 +239,7 @@ func (f *chainlinkFeed) latestAnswer(rpcURL string) (float64, error) {
 				"to":   chainlinkBTCUSD,
 				"data": latestAnswerSel,
 			},
-			"latest",
+			block,
 		},
 		"id": 1,
 	})
