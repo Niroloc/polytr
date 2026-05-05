@@ -6,6 +6,23 @@ import (
 	"time"
 )
 
+// StrategySignaler is the interface every trading algorithm must implement.
+// Evaluate is called on each poll tick; return nil to do nothing.
+// Implementations must be safe for concurrent use.
+type StrategySignaler interface {
+	Name() string
+	Evaluate(snap Snapshot) *TradeSignal
+}
+
+// BatchSignaler is an optional extension for strategies that need to see all
+// tokens in a tick simultaneously (e.g. straddle / spread strategies).
+// PaperTrader detects this interface via type assertion and calls EvaluateBatch
+// instead of Evaluate when present.
+type BatchSignaler interface {
+	Name() string
+	EvaluateBatch(snaps []Snapshot) []*TradeSignal
+}
+
 // Snapshot is the market state passed to the strategy each poll cycle.
 type Snapshot struct {
 	TokenID   string
@@ -20,18 +37,20 @@ type Snapshot struct {
 	Expiry    time.Time
 }
 
-// Params controls the simple edge strategy.
+// Params controls the edge strategy.
 type Params struct {
-	EdgeThreshold    float64
-	MaxSizeUSDC      float64
-	MinSizeUSDC      float64
-	PriceOffset      float64 // how far from mid to place (e.g. 0.01)
-	OrderTTL         time.Duration
+	Name              string
+	EdgeThreshold     float64
+	MaxSizeUSDC       float64
+	MinSizeUSDC       float64
+	PriceOffset       float64 // how far from mid to place (e.g. 0.01)
+	OrderTTL          time.Duration
 	MaxWindowRiskUSDC float64 // total USDC at risk per 5-minute window (0 = unlimited)
 }
 
 // Strategy decides whether to trade based on edge.
-// It tracks one open order per token to avoid stacking positions.
+// It tracks one open order per token for real-trading use; the guard is NOT
+// applied inside Evaluate — callers that need it should check OpenOrderID first.
 type Strategy struct {
 	params     Params
 	mu         sync.Mutex
@@ -45,16 +64,11 @@ func NewStrategy(p Params) *Strategy {
 	}
 }
 
+func (s *Strategy) Name() string { return s.params.Name }
+
 // Evaluate returns a TradeSignal if conditions are met, or nil to do nothing.
-//
-// Logic:
-//   - Skip if spread is too wide (> 3× edge threshold — likely illiquid)
-//   - Skip if we already have an open order for this token
-//   - Skip if TTE < 30s (too close to expiry)
-//   - BUY YES if edge > threshold (market underprices YES)
-//   - SELL YES (= BUY NO) if edge < -threshold (market overprices YES)
-//
-// Price is set at mid ± PriceOffset to rest as a passive limit order.
+// It does NOT check for open orders — that guard belongs to the caller
+// (see maybeExecute for real trading).
 func (s *Strategy) Evaluate(snap Snapshot) *TradeSignal {
 	if snap.Expiry.IsZero() || time.Until(snap.Expiry) < 30*time.Second {
 		return nil
@@ -62,14 +76,7 @@ func (s *Strategy) Evaluate(snap Snapshot) *TradeSignal {
 	if snap.Spread > 3*s.params.EdgeThreshold {
 		return nil
 	}
-	if snap.MidPrice <= 0 {
-		return nil
-	}
-
-	s.mu.Lock()
-	_, hasOpen := s.openOrders[snap.TokenID]
-	s.mu.Unlock()
-	if hasOpen {
+	if snap.MidPrice <= 0 || snap.FairPrice <= 0 {
 		return nil
 	}
 
@@ -81,17 +88,12 @@ func (s *Strategy) Evaluate(snap Snapshot) *TradeSignal {
 		return nil
 	}
 
-	if snap.FairPrice <= 0 {
-		return nil
-	}
-
 	var side Side
 	if snap.Edge > 0 {
 		side = Buy
 	} else {
 		side = Sell
 	}
-	// Maker order at fair price: rests on the book, never crosses the spread.
 	price := snap.FairPrice
 	if price < 0.01 {
 		price = 0.01
@@ -105,8 +107,8 @@ func (s *Strategy) Evaluate(snap Snapshot) *TradeSignal {
 		return nil
 	}
 
-	log.Printf("[strategy] signal %s %s @ %.4f edge=%+.4f size=%.2f USDC",
-		side, snap.TokenID[:min(8, len(snap.TokenID))], price, snap.Edge, size)
+	log.Printf("[strategy/%s] signal %s %s @ %.4f edge=%+.4f size=%.2f USDC",
+		s.params.Name, side, snap.TokenID[:min(8, len(snap.TokenID))], price, snap.Edge, size)
 
 	return &TradeSignal{
 		TokenID:  snap.TokenID,

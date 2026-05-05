@@ -153,6 +153,7 @@ func main() {
 		}
 		tradeClient = trader.NewClient(cfg.PolymarketCLOBURL, creds, signer, cfg.Trading.OrderTTL)
 		strategy = trader.NewStrategy(trader.Params{
+			Name:          "edge",
 			EdgeThreshold: cfg.Trading.EdgeThreshold,
 			MaxSizeUSDC:   cfg.Trading.MaxSizeUSDC,
 			MinSizeUSDC:   cfg.Trading.MinSizeUSDC,
@@ -165,17 +166,39 @@ func main() {
 		log.Println("[trader] disabled — collect-only mode (paper trading active)")
 	}
 
-	// Paper trader runs in collect-only mode to simulate strategy execution.
-	var paperTrader *trader.PaperTrader
+	// Paper traders run strategies in parallel in collect-only mode.
+	// Add new StrategySignaler implementations here to compare algorithms.
+	var paperTraders []*trader.PaperTrader
 	if !cfg.Trading.Enabled {
-		paperTrader = trader.NewPaperTrader(trader.Params{
-			EdgeThreshold:     cfg.Trading.EdgeThreshold,
-			MaxSizeUSDC:       *paperOrderSize,
-			MinSizeUSDC:       1,
-			PriceOffset:       cfg.Trading.PriceOffset,
-			OrderTTL:          cfg.Trading.OrderTTL,
+		ep := trader.PaperExecutorParams{
 			MaxWindowRiskUSDC: *paperMaxRisk,
-		}, windowLog)
+			MinSizeUSDC:       1,
+			LossCutEdge:       1.5 * cfg.Trading.EdgeThreshold,
+		}
+		epHold := trader.PaperExecutorParams{
+			MaxWindowRiskUSDC: *paperMaxRisk,
+			MinSizeUSDC:       1,
+			HoldToExpiry:      true,
+			NoNet:             true,
+		}
+		sigParams := trader.Params{
+			EdgeThreshold: cfg.Trading.EdgeThreshold,
+			MaxSizeUSDC:   *paperOrderSize,
+			MinSizeUSDC:   1,
+			PriceOffset:   cfg.Trading.PriceOffset,
+			OrderTTL:      cfg.Trading.OrderTTL,
+		}
+		paperTraders = []*trader.PaperTrader{
+			trader.NewPaperTrader(trader.NewStrategy(func() trader.Params {
+				p := sigParams; p.Name = "edge"; return p
+			}()), ep, windowLog),
+			trader.NewPaperTrader(trader.NewNearExpiryStrategy(func() trader.Params {
+				p := sigParams; p.Name = "near_expiry"; return p
+			}()), ep, windowLog),
+			trader.NewPaperTrader(trader.NewStraddleStrategy(func() trader.Params {
+				p := sigParams; p.Name = "straddle"; return p
+			}()), epHold, windowLog),
+		}
 	}
 
 	// Prometheus HTTP server
@@ -211,7 +234,7 @@ func main() {
 			newIDs := discoverAndLoadMeta(gammaClient, strikeFn)
 			if len(newIDs) > 0 {
 				// Close paper positions on outgoing tokens, then reset the window budget.
-				if paperTrader != nil {
+				if len(paperTraders) > 0 {
 					newSet := make(map[string]bool, len(newIDs))
 					for _, id := range newIDs {
 						newSet[id] = true
@@ -219,10 +242,15 @@ func main() {
 					for _, oldID := range cfg.MarketTokenIDs {
 						if !newSet[oldID] {
 							m := marketMeta[oldID]
-							paperTrader.OnExpiry(oldID, m.Outcome, computeSettlement(m.Outcome, currentSpot, m.Strike))
+							settlement := computeSettlement(m.Outcome, currentSpot, m.Strike)
+							for _, pt := range paperTraders {
+								pt.OnExpiry(oldID, m.Outcome, settlement)
+							}
 						}
 					}
-					paperTrader.OnNewWindow()
+					for _, pt := range paperTraders {
+						pt.OnNewWindow()
+					}
 				}
 				cfg.MarketTokenIDs = newIDs
 			}
@@ -243,12 +271,14 @@ func main() {
 
 			now := time.Now()
 			var active []string
+			var snapsBatch []trader.Snapshot
 			for _, tokenID := range cfg.MarketTokenIDs {
 				meta := marketMeta[tokenID]
 				if !meta.Expiry.IsZero() && now.After(meta.Expiry) {
 					log.Printf("[collector] token %.8s expired, removing", tokenID)
-					if paperTrader != nil {
-						paperTrader.OnExpiry(tokenID, meta.Outcome, computeSettlement(meta.Outcome, currentSpot, meta.Strike))
+					settlement := computeSettlement(meta.Outcome, currentSpot, meta.Strike)
+					for _, pt := range paperTraders {
+						pt.OnExpiry(tokenID, meta.Outcome, settlement)
 					}
 					delete(marketMeta, tokenID)
 					continue
@@ -263,19 +293,31 @@ func main() {
 				if tradeClient != nil && strategy != nil {
 					maybeExecute(strategy, tradeClient, *snap)
 				}
-				if paperTrader != nil {
-					snapCopy := *snap
-					if *execDelay > 0 {
-						time.AfterFunc(*execDelay, func() { paperTrader.OnTick(snapCopy) })
-					} else {
-						paperTrader.OnTick(snapCopy)
+				snapsBatch = append(snapsBatch, *snap)
+			}
+			cfg.MarketTokenIDs = active
+
+			// Deliver all snapshots to paper traders as a batch so cross-token
+			// strategies (e.g. straddle) can see both legs simultaneously.
+			if len(snapsBatch) > 0 && len(paperTraders) > 0 {
+				if *execDelay > 0 {
+					batch := snapsBatch
+					for _, pt := range paperTraders {
+						pt := pt
+						time.AfterFunc(*execDelay, func() { pt.OnTickBatch(batch) })
+					}
+				} else {
+					for _, pt := range paperTraders {
+						pt.OnTickBatch(snapsBatch)
 					}
 				}
 			}
-			cfg.MarketTokenIDs = active
+
 			// All tokens expired without rediscovery — reset window risk budget.
-			if paperTrader != nil && len(active) == 0 {
-				paperTrader.OnNewWindow()
+			if len(active) == 0 {
+				for _, pt := range paperTraders {
+					pt.OnNewWindow()
+				}
 			}
 		}
 	}
@@ -453,6 +495,10 @@ func pollToken(
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func maybeExecute(s *trader.Strategy, tc *trader.Client, snap trader.Snapshot) {
+	// Guard: one live order per token. Evaluate no longer applies this check.
+	if s.OpenOrderID(snap.TokenID) != "" {
+		return
+	}
 	sig := s.Evaluate(snap)
 	if sig == nil {
 		return

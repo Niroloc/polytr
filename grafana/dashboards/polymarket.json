@@ -169,11 +169,11 @@
       "targets": [
         {
           "expr": "polymarket_paper_daily_pnl",
-          "legendFormat": "Daily P&L"
+          "legendFormat": "Daily {{strategy}}"
         },
         {
           "expr": "polymarket_paper_total_pnl",
-          "legendFormat": "All-time P&L"
+          "legendFormat": "All-time {{strategy}}"
         }
       ]
     },
@@ -213,7 +213,7 @@
       "targets": [
         {
           "expr": "polymarket_paper_unrealized_pnl",
-          "legendFormat": "Unrealized {{outcome}}"
+          "legendFormat": "{{strategy}} {{outcome}}"
         }
       ]
     },
@@ -253,7 +253,7 @@
       "targets": [
         {
           "expr": "polymarket_paper_window_pnl",
-          "legendFormat": "Window P&L {{outcome}}"
+          "legendFormat": "{{strategy}} {{outcome}}"
         }
       ]
     },
@@ -293,7 +293,7 @@
       "targets": [
         {
           "expr": "polymarket_paper_position_net_usdc",
-          "legendFormat": "Net position"
+          "legendFormat": "{{strategy}}"
         }
       ]
     },
@@ -316,11 +316,11 @@
       "targets": [
         {
           "expr": "polymarket_paper_window_risk_used_usdc",
-          "legendFormat": "Risk used"
+          "legendFormat": "Used {{strategy}}"
         },
         {
           "expr": "polymarket_paper_window_risk_limit_usdc",
-          "legendFormat": "Limit ($100)"
+          "legendFormat": "Limit {{strategy}}"
         }
       ]
     },
@@ -363,7 +363,7 @@
       "targets": [
         {
           "expr": "polymarket_paper_total_pnl",
-          "legendFormat": "Total P&L"
+          "legendFormat": "{{strategy}}"
         }
       ]
     },
@@ -387,7 +387,7 @@
       "targets": [
         {
           "expr": "polymarket_paper_entry_price",
-          "legendFormat": "{{side}} {{outcome}}"
+          "legendFormat": "{{strategy}} {{side}} {{outcome}}"
         }
       ]
     },
@@ -411,7 +411,7 @@
       "targets": [
         {
           "expr": "polymarket_paper_trades_total",
-          "legendFormat": "{{side}} {{outcome}}"
+          "legendFormat": "{{strategy}} {{side}} {{outcome}}"
         }
       ]
     }

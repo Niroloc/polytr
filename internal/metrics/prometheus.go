@@ -68,64 +68,62 @@ var (
 	}, []string{"outcome"})
 
 	// Effective annualised volatility used for Black-Scholes pricing.
-	// Reflects the rolling Binance estimate when enabled, otherwise static --sigma.
 	SigmaCurrent = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "polymarket_sigma",
 		Help: "Effective annualised volatility σ used for Black-Scholes pricing",
 	})
 
-	// ── paper trading ──────────────────────────────────────────────────────────
+	// ── paper trading ─────────────────────────────────────────────────────────
+	// All paper metrics carry a "strategy" label so multiple algorithms can be
+	// compared on the same Grafana panels.
 
 	PaperTradeEntryPrice = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_entry_price",
 		Help: "Entry price of the most recent paper trade",
-	}, []string{"outcome", "side"})
+	}, []string{"strategy", "outcome", "side"})
 
 	PaperTradeSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_trade_size_usdc",
 		Help: "Notional size in USDC of the most recent paper trade",
-	}, []string{"outcome", "side"})
+	}, []string{"strategy", "outcome", "side"})
 
 	PaperUnrealizedPnL = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_unrealized_pnl",
 		Help: "Mark-to-market unrealized P&L for the open paper position",
-	}, []string{"outcome"})
+	}, []string{"strategy", "outcome"})
 
 	PaperWindowPnL = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_window_pnl",
 		Help: "Realized P&L of the most recently closed 5-minute window per outcome",
-	}, []string{"outcome"})
+	}, []string{"strategy", "outcome"})
 
-	PaperTotalPnL = promauto.NewGauge(prometheus.GaugeOpts{
+	PaperTotalPnL = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_total_pnl",
 		Help: "Cumulative paper trading P&L since start",
-	})
+	}, []string{"strategy"})
 
 	PaperTradesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "polymarket_paper_trades_total",
 		Help: "Number of paper trades executed",
-	}, []string{"outcome", "side"})
+	}, []string{"strategy", "outcome", "side"})
 
-	// Net position in USDC: positive = long Up, negative = long Down, 0 = flat.
-	// |net| is bounded by MaxWindowRiskUSDC.
-	PaperPositionNetUSDC = promauto.NewGauge(prometheus.GaugeOpts{
+	PaperPositionNetUSDC = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_position_net_usdc",
 		Help: "Net paper position in USDC: +N = long Up by $N, −N = long Down by $N",
-	})
+	}, []string{"strategy"})
 
-	PaperWindowRiskUsed = promauto.NewGauge(prometheus.GaugeOpts{
+	PaperWindowRiskUsed = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_window_risk_used_usdc",
 		Help: "USDC committed to paper trades in the current 5-minute window",
-	})
+	}, []string{"strategy"})
 
-	PaperWindowRiskLimit = promauto.NewGauge(prometheus.GaugeOpts{
+	PaperWindowRiskLimit = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_window_risk_limit_usdc",
 		Help: "Maximum USDC risk allowed per 5-minute window",
-	})
+	}, []string{"strategy"})
 
-	// Resets to 0 at midnight UTC; shows today's running P&L.
-	PaperDailyPnL = promauto.NewGauge(prometheus.GaugeOpts{
+	PaperDailyPnL = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "polymarket_paper_daily_pnl",
 		Help: "Paper trading P&L accumulated since midnight UTC today",
-	})
+	}, []string{"strategy"})
 )
