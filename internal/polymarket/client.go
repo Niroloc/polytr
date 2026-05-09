@@ -31,6 +31,25 @@ func (c *Client) GetMarket(conditionID string) (*Market, error) {
 	return &m, nil
 }
 
+// dataAPIBase is Polymarket's public read-only data API host.
+// It is separate from the CLOB host and requires no authentication.
+const dataAPIBase = "https://data-api.polymarket.com"
+
+// GetTrades fetches recent trades for a market (by condition ID) from the
+// public Polymarket data API. Trades are returned sorted by timestamp desc.
+// limit caps the number of rows; pass 0 for the API default (100).
+func (c *Client) GetTrades(conditionID string, limit int) ([]Trade, error) {
+	url := fmt.Sprintf("%s/trades?market=%s", dataAPIBase, conditionID)
+	if limit > 0 {
+		url += fmt.Sprintf("&limit=%d", limit)
+	}
+	var trades []Trade
+	if err := c.get(url, &trades); err != nil {
+		return nil, err
+	}
+	return trades, nil
+}
+
 // GetOrderBook fetches the current order book for a token (YES or NO side).
 func (c *Client) GetOrderBook(tokenID string) (*OrderBook, error) {
 	url := fmt.Sprintf("%s/book?token_id=%s", c.baseURL, tokenID)

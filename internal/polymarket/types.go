@@ -68,6 +68,22 @@ func (ob *OrderBook) Spread() float64 {
 	return ob.BestAsk() - ob.BestBid()
 }
 
+// Trade is a single executed trade from data-api.polymarket.com/trades.
+// All trades on the public order book are returned here regardless of taker.
+type Trade struct {
+	ProxyWallet     string  `json:"proxyWallet"`
+	Side            string  `json:"side"` // "BUY" or "SELL" (taker side)
+	Asset           string  `json:"asset"`
+	ConditionID     string  `json:"conditionId"`
+	Size            float64 `json:"size"`
+	Price           float64 `json:"price"`
+	Timestamp       int64   `json:"timestamp"` // Unix seconds
+	Outcome         string  `json:"outcome"`
+	OutcomeIndex    int     `json:"outcomeIndex"`
+	Slug            string  `json:"slug"`
+	TransactionHash string  `json:"transactionHash"`
+}
+
 // raw API response structures
 
 type apiOrderBookResponse struct {

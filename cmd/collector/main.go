@@ -134,6 +134,13 @@ func main() {
 	}
 	defer windowLog.Close()
 
+	tradeLog, err := csvlog.NewTradeWriter(cfg.CSVDir)
+	if err != nil {
+		log.Fatalf("tradelog: %v", err)
+	}
+	defer tradeLog.Close()
+	seenTrades := make(map[string]bool) // tx_hash → seen
+
 	// CLOB client for order book polling
 	pmClient := polymarket.NewClient(cfg.PolymarketCLOBURL)
 
@@ -253,6 +260,8 @@ func main() {
 					}
 				}
 				cfg.MarketTokenIDs = newIDs
+				// Drop dedupe state for old window — txHashes won't recur.
+				seenTrades = make(map[string]bool)
 			}
 			rediscoverTimer.Reset(untilNextWindow())
 
@@ -296,6 +305,17 @@ func main() {
 				snapsBatch = append(snapsBatch, *snap)
 			}
 			cfg.MarketTokenIDs = active
+
+			// Fetch and log new market trades for each unique active condition ID.
+			seenMarkets := make(map[string]bool, 1)
+			for _, tid := range active {
+				cid := marketMeta[tid].MarketID
+				if cid == "" || seenMarkets[cid] {
+					continue
+				}
+				seenMarkets[cid] = true
+				fetchAndLogTrades(pmClient, tradeLog, cid, seenTrades)
+			}
 
 			// Deliver all snapshots to paper traders as a batch so cross-token
 			// strategies (e.g. straddle) can see both legs simultaneously.
@@ -493,6 +513,37 @@ func pollToken(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// fetchAndLogTrades pulls recent trades for one market from the public data API
+// and writes any rows whose tx_hash hasn't been seen yet to the trades CSV.
+// Errors are logged and swallowed; a transient API failure should not break polling.
+func fetchAndLogTrades(client *polymarket.Client, tw *csvlog.TradeWriter, conditionID string, seen map[string]bool) {
+	trades, err := client.GetTrades(conditionID, 100)
+	if err != nil {
+		log.Printf("[trades] %.8s fetch: %v", conditionID, err)
+		return
+	}
+	for _, t := range trades {
+		if t.TransactionHash == "" || seen[t.TransactionHash] {
+			continue
+		}
+		seen[t.TransactionHash] = true
+		rec := csvlog.TradeRecord{
+			Ts:          time.Unix(t.Timestamp, 0).UTC(),
+			MarketID:    t.ConditionID,
+			TokenID:     t.Asset,
+			Outcome:     t.Outcome,
+			Side:        t.Side,
+			Price:       t.Price,
+			Size:        t.Size,
+			TakerWallet: t.ProxyWallet,
+			TxHash:      t.TransactionHash,
+		}
+		if err := tw.Write(rec); err != nil {
+			log.Printf("[trades] write: %v", err)
+		}
+	}
+}
 
 func maybeExecute(s *trader.Strategy, tc *trader.Client, snap trader.Snapshot) {
 	// Guard: one live order per token. Evaluate no longer applies this check.
