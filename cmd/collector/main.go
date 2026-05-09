@@ -140,6 +140,9 @@ func main() {
 	}
 	defer tradeLog.Close()
 	seenTrades := make(map[string]bool) // tx_hash → seen
+	// Trades older than processStart are written to CSV but skipped for metrics
+	// to avoid a spike from the historical batch on the first poll.
+	processStart := time.Now()
 
 	// CLOB client for order book polling
 	pmClient := polymarket.NewClient(cfg.PolymarketCLOBURL)
@@ -314,7 +317,7 @@ func main() {
 					continue
 				}
 				seenMarkets[cid] = true
-				fetchAndLogTrades(pmClient, tradeLog, cid, seenTrades)
+				fetchAndLogTrades(pmClient, tradeLog, cid, seenTrades, processStart)
 			}
 
 			// Deliver all snapshots to paper traders as a batch so cross-token
@@ -516,8 +519,10 @@ func pollToken(
 
 // fetchAndLogTrades pulls recent trades for one market from the public data API
 // and writes any rows whose tx_hash hasn't been seen yet to the trades CSV.
+// Trades that occurred before metricsSince (process start) are CSV-only — emitting
+// metrics for them would create artificial spikes on the first poll.
 // Errors are logged and swallowed; a transient API failure should not break polling.
-func fetchAndLogTrades(client *polymarket.Client, tw *csvlog.TradeWriter, conditionID string, seen map[string]bool) {
+func fetchAndLogTrades(client *polymarket.Client, tw *csvlog.TradeWriter, conditionID string, seen map[string]bool, metricsSince time.Time) {
 	trades, err := client.GetTrades(conditionID, 100)
 	if err != nil {
 		log.Printf("[trades] %.8s fetch: %v", conditionID, err)
@@ -528,8 +533,9 @@ func fetchAndLogTrades(client *polymarket.Client, tw *csvlog.TradeWriter, condit
 			continue
 		}
 		seen[t.TransactionHash] = true
+		ts := time.Unix(t.Timestamp, 0).UTC()
 		rec := csvlog.TradeRecord{
-			Ts:          time.Unix(t.Timestamp, 0).UTC(),
+			Ts:          ts,
 			MarketID:    t.ConditionID,
 			TokenID:     t.Asset,
 			Outcome:     t.Outcome,
@@ -542,6 +548,13 @@ func fetchAndLogTrades(client *polymarket.Client, tw *csvlog.TradeWriter, condit
 		if err := tw.Write(rec); err != nil {
 			log.Printf("[trades] write: %v", err)
 		}
+		if ts.Before(metricsSince) {
+			continue
+		}
+		metrics.MarketTradesTotal.WithLabelValues(t.Outcome, t.Side).Inc()
+		metrics.MarketTradeVolumeUSDC.WithLabelValues(t.Outcome, t.Side).Add(t.Price * t.Size)
+		metrics.MarketTradeLastPrice.WithLabelValues(t.Outcome, t.Side).Set(t.Price)
+		metrics.MarketTradeLastSize.WithLabelValues(t.Outcome, t.Side).Set(t.Size)
 	}
 }
 

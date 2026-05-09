@@ -111,7 +111,8 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Bid / Ask / Spread",
+      "title": "Bid / Ask / Spread / Last Trade",
+      "description": "Order book bid/ask plus the most recent executed trade price (taker BUY = lifted ask, taker SELL = hit bid).",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -130,6 +131,10 @@
         {
           "expr": "polymarket_spread",
           "legendFormat": "Spread {{outcome}}"
+        },
+        {
+          "expr": "polymarket_market_trade_last_price",
+          "legendFormat": "Trade {{outcome}} {{side}}"
         }
       ]
     },
@@ -412,6 +417,109 @@
         {
           "expr": "polymarket_paper_trades_total",
           "legendFormat": "{{strategy}} {{side}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Market Trades — Rate (per minute)",
+      "description": "Number of trades observed on the public order book per minute, broken down by outcome and taker side. BUY = ask was lifted, SELL = bid was hit.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(polymarket_market_trades_total[1m]) * 60",
+          "legendFormat": "{{outcome}} {{side}}"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Market Trades — Volume (USDC per minute)",
+      "description": "USDC notional volume (price × size) executed on the public order book per minute, broken down by outcome and taker side.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(polymarket_market_trade_volume_usdc_total[1m]) * 60",
+          "legendFormat": "{{outcome}} {{side}}"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Market Trades — Cumulative Count",
+      "description": "Total trades observed since collector start, by outcome and taker side.",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_market_trades_total",
+          "legendFormat": "{{outcome}} {{side}}"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "Market Trades — Cumulative Volume",
+      "description": "Total USDC notional volume observed since collector start.",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "polymarket_market_trade_volume_usdc_total",
+          "legendFormat": "{{outcome}} {{side}}"
         }
       ]
     }

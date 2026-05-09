@@ -67,6 +67,31 @@ var (
 		Help: "Total number of errors polling Polymarket",
 	}, []string{"outcome"})
 
+	// ── market trades (data-api.polymarket.com/trades) ────────────────────────
+	// Each new trade observed bumps these counters and updates the last-price
+	// gauge. Only trades arriving after process start are reflected here —
+	// historical trades fetched on first poll go to CSV only.
+
+	MarketTradesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "polymarket_market_trades_total",
+		Help: "Number of trades executed on the public order book",
+	}, []string{"outcome", "side"})
+
+	MarketTradeVolumeUSDC = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "polymarket_market_trade_volume_usdc_total",
+		Help: "Total USDC notional volume traded (price × size)",
+	}, []string{"outcome", "side"})
+
+	MarketTradeLastPrice = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "polymarket_market_trade_last_price",
+		Help: "Most recent executed trade price",
+	}, []string{"outcome", "side"})
+
+	MarketTradeLastSize = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "polymarket_market_trade_last_size",
+		Help: "Most recent executed trade size in shares",
+	}, []string{"outcome", "side"})
+
 	// Effective annualised volatility used for Black-Scholes pricing.
 	SigmaCurrent = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "polymarket_sigma",
