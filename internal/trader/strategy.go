@@ -1,7 +1,6 @@
 package trader
 
 import (
-	"log"
 	"sync"
 	"time"
 )
@@ -106,9 +105,6 @@ func (s *Strategy) Evaluate(snap Snapshot) *TradeSignal {
 	if size < s.params.MinSizeUSDC {
 		return nil
 	}
-
-	log.Printf("[strategy/%s] signal %s %s @ %.4f edge=%+.4f size=%.2f USDC",
-		s.params.Name, side, snap.TokenID[:min(8, len(snap.TokenID))], price, snap.Edge, size)
 
 	return &TradeSignal{
 		TokenID:  snap.TokenID,

@@ -32,12 +32,10 @@ func main() {
 	discoverWindow := flag.Duration("discover-window", 1*time.Hour, "Track markets expiring within this window")
 	sigma := flag.Float64("sigma", 0.20, "Annualised volatility σ for Black-Scholes (fallback when --sigma-window=0 or insufficient data)")
 	sigmaWindow := flag.Duration("sigma-window", 5*time.Minute, "Rolling window for σ estimation from Binance prices (0 = use static --sigma)")
-	execDelay        := flag.Duration("exec-delay", 150*time.Millisecond, "Simulated order execution latency for paper trading (0 to disable)")
-	paperOrderSize   := flag.Float64("paper-order-size", 20, "Max USDC per individual buy tick in paper trading")
-	paperMaxRisk     := flag.Float64("paper-max-risk", 100, "Max net position in USDC per 5-minute window in paper trading")
+	paperOrderSize := flag.Float64("paper-order-size", 20, "Max USDC per individual buy tick in paper trading")
+	paperMaxRisk := flag.Float64("paper-max-risk", 100, "Max net position in USDC per 5-minute window in paper trading")
 	metricsAddr := flag.String("metrics", ":9100", "Prometheus /metrics listen address")
 	csvDir := flag.String("csv", "data", "Directory for CSV output files")
-	pollInterval := flag.Duration("poll", 4*time.Second, "Order book polling interval")
 	envFile := flag.String("env", ".env", "Path to .env file with API credentials")
 	btcSource := flag.String("btc-source", "polymarket", "BTC price source: polymarket (Chainlink on-chain) or binance (WebSocket)")
 	polygonRPC := flag.String("polygon-rpc", btcprice.DefaultPolygonRPC, "Polygon JSON-RPC URL for Chainlink price feed")
@@ -51,7 +49,6 @@ func main() {
 	cfg.Volatility = *sigma
 	cfg.MetricsAddr = *metricsAddr
 	cfg.CSVDir = *csvDir
-	cfg.PollInterval = *pollInterval
 
 	gammaClient := gamma.NewClient()
 
@@ -139,13 +136,11 @@ func main() {
 		log.Fatalf("tradelog: %v", err)
 	}
 	defer tradeLog.Close()
-	seenTrades := make(map[string]bool) // tx_hash → seen
-	// Trades older than processStart are written to CSV but skipped for metrics
-	// to avoid a spike from the historical batch on the first poll.
-	processStart := time.Now()
 
-	// CLOB client for order book polling
-	pmClient := polymarket.NewClient(cfg.PolymarketCLOBURL)
+	// Polymarket market WebSocket: drives order-book and trade updates in real time.
+	wsClient := polymarket.NewWSClient()
+	go wsClient.Run(ctx)
+	wsClient.Subscribe(cfg.MarketTokenIDs)
 
 	// Trading infrastructure (only when credentials are present)
 	var tradeClient *trader.Client
@@ -224,14 +219,18 @@ func main() {
 	}()
 	defer srv.Shutdown(context.Background()) //nolint:errcheck
 
-	log.Printf("[collector] σ=%.2f poll=%s", cfg.Volatility, cfg.PollInterval)
-
-	ticker := time.NewTicker(cfg.PollInterval)
-	defer ticker.Stop()
+	log.Printf("[collector] σ=%.2f event-driven (WS)", cfg.Volatility)
 
 	// Re-discover aligned to 5-minute window boundaries.
 	rediscoverTimer := time.NewTimer(untilNextWindow())
 	defer rediscoverTimer.Stop()
+
+	// Housekeeping: TTE metric refresh, expiry sweep, BTC spot/σ metrics.
+	// Runs independently of WS traffic so metrics stay live on dormant markets.
+	housekeeping := time.NewTicker(1 * time.Second)
+	defer housekeeping.Stop()
+
+	events := wsClient.Events()
 
 	for {
 		select {
@@ -243,7 +242,6 @@ func main() {
 			currentSpot := priceFeed.Price()
 			newIDs := discoverAndLoadMeta(gammaClient, strikeFn)
 			if len(newIDs) > 0 {
-				// Close paper positions on outgoing tokens, then reset the window budget.
 				if len(paperTraders) > 0 {
 					newSet := make(map[string]bool, len(newIDs))
 					for _, id := range newIDs {
@@ -263,84 +261,81 @@ func main() {
 					}
 				}
 				cfg.MarketTokenIDs = newIDs
-				// Drop dedupe state for old window — txHashes won't recur.
-				seenTrades = make(map[string]bool)
+				wsClient.Subscribe(newIDs)
 			}
 			rediscoverTimer.Reset(untilNextWindow())
 
-		case <-ticker.C:
+		case <-housekeeping.C:
 			currentSpot := priceFeed.Price()
 			metrics.BTCSpotPrice.Set(currentSpot)
+			if rollingVol != nil {
+				if s := rollingVol.Sigma(); s > 0 {
+					metrics.SigmaCurrent.Set(s)
+				}
+			}
+			now := time.Now()
+			var active []string
+			for _, tid := range cfg.MarketTokenIDs {
+				meta := marketMeta[tid]
+				if !meta.Expiry.IsZero() {
+					tte := pricing.TimeToExpiry(meta.Expiry)
+					metrics.TimeToExpirySec.WithLabelValues(meta.Outcome).Set(tte)
+					if now.After(meta.Expiry) {
+						log.Printf("[collector] token %.8s expired, removing", tid)
+						settlement := computeSettlement(meta.Outcome, currentSpot, meta.Strike)
+						for _, pt := range paperTraders {
+							pt.OnExpiry(tid, meta.Outcome, settlement)
+						}
+						delete(marketMeta, tid)
+						continue
+					}
+				}
+				active = append(active, tid)
+			}
+			if len(active) != len(cfg.MarketTokenIDs) {
+				cfg.MarketTokenIDs = active
+				if len(active) == 0 {
+					for _, pt := range paperTraders {
+						pt.OnNewWindow()
+					}
+				}
+			}
 
-			// Use rolling Binance vol when available, fall back to static --sigma.
+		case ev := <-events:
+			if ev.Type == "trade" {
+				handleTradeEvent(ev, tradeLog)
+				continue
+			}
+			// book / price_change: top-of-book changed for ev.TokenID.
+			currentSpot := priceFeed.Price()
 			effectiveSigma := cfg.Volatility
 			if rollingVol != nil {
 				if s := rollingVol.Sigma(); s > 0 {
 					effectiveSigma = s
-					metrics.SigmaCurrent.Set(s)
 				}
 			}
-
-			now := time.Now()
-			var active []string
-			var snapsBatch []trader.Snapshot
-			for _, tokenID := range cfg.MarketTokenIDs {
-				meta := marketMeta[tokenID]
-				if !meta.Expiry.IsZero() && now.After(meta.Expiry) {
-					log.Printf("[collector] token %.8s expired, removing", tokenID)
-					settlement := computeSettlement(meta.Outcome, currentSpot, meta.Strike)
-					for _, pt := range paperTraders {
-						pt.OnExpiry(tokenID, meta.Outcome, settlement)
-					}
-					delete(marketMeta, tokenID)
+			snap := buildSnapshot(wsClient, ev.TokenID, currentSpot, effectiveSigma)
+			if snap == nil {
+				continue
+			}
+			writeAndEmitSnapshot(csvWriter, snap, currentSpot)
+			if tradeClient != nil && strategy != nil {
+				maybeExecute(strategy, tradeClient, *snap)
+			}
+			// Build batch with current snaps for all tracked tokens so cross-token
+			// strategies (e.g. straddle) always see both legs.
+			batch := make([]trader.Snapshot, 0, len(cfg.MarketTokenIDs))
+			for _, tid := range cfg.MarketTokenIDs {
+				if tid == ev.TokenID {
+					batch = append(batch, *snap)
 					continue
 				}
-				active = append(active, tokenID)
-				snap, err := pollToken(pmClient, csvWriter, tokenID, currentSpot, effectiveSigma)
-				if err != nil {
-					log.Printf("[collector] token %.8s: %v", tokenID, err)
-					metrics.PollErrors.WithLabelValues(marketMeta[tokenID].Outcome).Inc()
-					continue
-				}
-				if tradeClient != nil && strategy != nil {
-					maybeExecute(strategy, tradeClient, *snap)
-				}
-				snapsBatch = append(snapsBatch, *snap)
-			}
-			cfg.MarketTokenIDs = active
-
-			// Fetch and log new market trades for each unique active condition ID.
-			seenMarkets := make(map[string]bool, 1)
-			for _, tid := range active {
-				cid := marketMeta[tid].MarketID
-				if cid == "" || seenMarkets[cid] {
-					continue
-				}
-				seenMarkets[cid] = true
-				fetchAndLogTrades(pmClient, tradeLog, cid, seenTrades, processStart)
-			}
-
-			// Deliver all snapshots to paper traders as a batch so cross-token
-			// strategies (e.g. straddle) can see both legs simultaneously.
-			if len(snapsBatch) > 0 && len(paperTraders) > 0 {
-				if *execDelay > 0 {
-					batch := snapsBatch
-					for _, pt := range paperTraders {
-						pt := pt
-						time.AfterFunc(*execDelay, func() { pt.OnTickBatch(batch) })
-					}
-				} else {
-					for _, pt := range paperTraders {
-						pt.OnTickBatch(snapsBatch)
-					}
+				if s := buildSnapshot(wsClient, tid, currentSpot, effectiveSigma); s != nil {
+					batch = append(batch, *s)
 				}
 			}
-
-			// All tokens expired without rediscovery — reset window risk budget.
-			if len(active) == 0 {
-				for _, pt := range paperTraders {
-					pt.OnNewWindow()
-				}
+			for _, pt := range paperTraders {
+				pt.OnTickBatch(batch)
 			}
 		}
 	}
@@ -427,34 +422,28 @@ func slugOpenTime(slug string) time.Time {
 	return time.Unix(ts, 0)
 }
 
-// ── poll loop ─────────────────────────────────────────────────────────────────
+// ── event handlers ────────────────────────────────────────────────────────────
 
-func pollToken(
-	client *polymarket.Client,
-	csv *csvlog.Writer,
-	tokenID string,
-	spot, sigma float64,
-) (*trader.Snapshot, error) {
-	ob, err := client.GetOrderBook(tokenID)
-	if err != nil {
-		return nil, err
+// buildSnapshot reads the current order-book state for tokenID from the WS
+// client and computes a trader.Snapshot. Returns nil if no book is available
+// yet or tokenID is unknown. No side effects.
+func buildSnapshot(ws *polymarket.WSClient, tokenID string, spot, sigma float64) *trader.Snapshot {
+	ob := ws.BookSnapshot(tokenID)
+	if ob == nil {
+		return nil
 	}
-
-	meta := marketMeta[tokenID]
-
+	meta, ok := marketMeta[tokenID]
+	if !ok {
+		return nil
+	}
 	var tte float64
 	if !meta.Expiry.IsZero() {
 		tte = pricing.TimeToExpiry(meta.Expiry)
-		metrics.TimeToExpirySec.WithLabelValues(meta.Outcome).Set(tte)
 	}
-
-	// ATM strike: use spot at market open; fall back to current spot.
 	strike := meta.Strike
 	if strike == 0 {
 		strike = spot
 	}
-	strikeStr := strconv.FormatFloat(strike, 'f', 2, 64)
-
 	var fair float64
 	if spot > 0 && strike > 0 && tte > 0 {
 		switch meta.Outcome {
@@ -464,98 +453,88 @@ func pollToken(
 			fair = pricing.BinaryPutPrice(spot, strike, tte, sigma, 0)
 		}
 	}
-
-	bid := ob.BestBid()
-	ask := ob.BestAsk()
 	mid := ob.MidPrice()
-	spread := ob.Spread()
-	edge := fair - mid
-
-	out := meta.Outcome
-	metrics.MarketBestBid.WithLabelValues(out).Set(bid)
-	metrics.MarketBestAsk.WithLabelValues(out).Set(ask)
-	metrics.MarketMidPrice.WithLabelValues(out).Set(mid)
-	metrics.MarketSpread.WithLabelValues(out).Set(spread)
-	metrics.FairPrice.WithLabelValues(out).Set(fair)
-	metrics.Edge.WithLabelValues(out).Set(edge)
-	metrics.Strike.WithLabelValues(out).Set(strike)
-
-	log.Printf("[%.8s %s] spot=%.2f K=%.2f bid=%.4f ask=%.4f fair=%.4f edge=%+.4f tte=%.0fs",
-		tokenID, meta.Outcome, spot, strike, bid, ask, fair, edge, tte)
-
-	if err := csv.Write(csvlog.Snapshot{
-		Ts:         time.Now(),
-		MarketID:   meta.MarketID,
-		TokenID:    tokenID,
-		Outcome:    meta.Outcome,
-		Strike:     strikeStr,
-		BTCSpot:    spot,
-		BestBid:    bid,
-		BestAsk:    ask,
-		MidPrice:   mid,
-		Spread:     spread,
-		FairPrice:  fair,
-		Edge:       edge,
-		TTESeconds: tte,
-	}); err != nil {
-		log.Printf("[csv] %v", err)
-	}
-
 	return &trader.Snapshot{
 		TokenID:   tokenID,
 		MarketID:  meta.MarketID,
 		Outcome:   meta.Outcome,
 		MidPrice:  mid,
-		BestBid:   bid,
-		BestAsk:   ask,
+		BestBid:   ob.BestBid(),
+		BestAsk:   ob.BestAsk(),
 		FairPrice: fair,
-		Edge:      edge,
-		Spread:    spread,
+		Edge:      fair - mid,
+		Spread:    ob.Spread(),
 		Expiry:    meta.Expiry,
-	}, nil
+	}
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// writeAndEmitSnapshot updates per-token Prometheus metrics and writes a row
+// to the snapshot CSV. Called on every WS top-of-book change.
+func writeAndEmitSnapshot(csvWriter *csvlog.Writer, snap *trader.Snapshot, spot float64) {
+	meta := marketMeta[snap.TokenID]
+	strike := meta.Strike
+	if strike == 0 {
+		strike = spot
+	}
+	tte := 0.0
+	if !meta.Expiry.IsZero() {
+		tte = pricing.TimeToExpiry(meta.Expiry)
+	}
+	out := meta.Outcome
+	metrics.MarketBestBid.WithLabelValues(out).Set(snap.BestBid)
+	metrics.MarketBestAsk.WithLabelValues(out).Set(snap.BestAsk)
+	metrics.MarketMidPrice.WithLabelValues(out).Set(snap.MidPrice)
+	metrics.MarketSpread.WithLabelValues(out).Set(snap.Spread)
+	metrics.FairPrice.WithLabelValues(out).Set(snap.FairPrice)
+	metrics.Edge.WithLabelValues(out).Set(snap.Edge)
+	metrics.Strike.WithLabelValues(out).Set(strike)
 
-// fetchAndLogTrades pulls recent trades for one market from the public data API
-// and writes any rows whose tx_hash hasn't been seen yet to the trades CSV.
-// Trades that occurred before metricsSince (process start) are CSV-only — emitting
-// metrics for them would create artificial spikes on the first poll.
-// Errors are logged and swallowed; a transient API failure should not break polling.
-func fetchAndLogTrades(client *polymarket.Client, tw *csvlog.TradeWriter, conditionID string, seen map[string]bool, metricsSince time.Time) {
-	trades, err := client.GetTrades(conditionID, 100)
-	if err != nil {
-		log.Printf("[trades] %.8s fetch: %v", conditionID, err)
+	if err := csvWriter.Write(csvlog.Snapshot{
+		Ts:         time.Now(),
+		MarketID:   snap.MarketID,
+		TokenID:    snap.TokenID,
+		Outcome:    snap.Outcome,
+		Strike:     strconv.FormatFloat(strike, 'f', 2, 64),
+		BTCSpot:    spot,
+		BestBid:    snap.BestBid,
+		BestAsk:    snap.BestAsk,
+		MidPrice:   snap.MidPrice,
+		Spread:     snap.Spread,
+		FairPrice:  snap.FairPrice,
+		Edge:       snap.Edge,
+		TTESeconds: tte,
+	}); err != nil {
+		log.Printf("[csv] %v", err)
+	}
+}
+
+// handleTradeEvent writes one WS-observed trade to the CSV and updates metrics.
+// Takerwallet and txHash are not available via WebSocket — those columns stay
+// empty (the REST data API has them but isn't queried in the WS path).
+func handleTradeEvent(ev polymarket.MarketEvent, tw *csvlog.TradeWriter) {
+	if ev.Trade == nil {
 		return
 	}
-	for _, t := range trades {
-		if t.TransactionHash == "" || seen[t.TransactionHash] {
-			continue
-		}
-		seen[t.TransactionHash] = true
-		ts := time.Unix(t.Timestamp, 0).UTC()
-		rec := csvlog.TradeRecord{
-			Ts:          ts,
-			MarketID:    t.ConditionID,
-			TokenID:     t.Asset,
-			Outcome:     t.Outcome,
-			Side:        t.Side,
-			Price:       t.Price,
-			Size:        t.Size,
-			TakerWallet: t.ProxyWallet,
-			TxHash:      t.TransactionHash,
-		}
-		if err := tw.Write(rec); err != nil {
-			log.Printf("[trades] write: %v", err)
-		}
-		if ts.Before(metricsSince) {
-			continue
-		}
-		metrics.MarketTradesTotal.WithLabelValues(t.Outcome, t.Side).Inc()
-		metrics.MarketTradeVolumeUSDC.WithLabelValues(t.Outcome, t.Side).Add(t.Price * t.Size)
-		metrics.MarketTradeLastPrice.WithLabelValues(t.Outcome, t.Side).Set(t.Price)
-		metrics.MarketTradeLastSize.WithLabelValues(t.Outcome, t.Side).Set(t.Size)
+	meta, ok := marketMeta[ev.TokenID]
+	if !ok {
+		return
 	}
+	rec := csvlog.TradeRecord{
+		Ts:       ev.Ts.UTC(),
+		MarketID: meta.MarketID,
+		TokenID:  ev.TokenID,
+		Outcome:  meta.Outcome,
+		Side:     ev.Trade.Side,
+		Price:    ev.Trade.Price,
+		Size:     ev.Trade.Size,
+	}
+	if err := tw.Write(rec); err != nil {
+		log.Printf("[trades] write: %v", err)
+	}
+	metrics.MarketTradesTotal.WithLabelValues(meta.Outcome, ev.Trade.Side).Inc()
+	metrics.MarketTradeVolumeUSDC.WithLabelValues(meta.Outcome, ev.Trade.Side).Add(ev.Trade.Price * ev.Trade.Size)
+	metrics.MarketTradeLastPrice.WithLabelValues(meta.Outcome, ev.Trade.Side).Set(ev.Trade.Price)
+	metrics.MarketTradeLastSize.WithLabelValues(meta.Outcome, ev.Trade.Side).Set(ev.Trade.Size)
 }
 
 func maybeExecute(s *trader.Strategy, tc *trader.Client, snap trader.Snapshot) {
@@ -611,5 +590,3 @@ func computeSettlement(outcome string, spot, strike float64) float64 {
 	return 0.0
 }
 
-// strings is used in pollToken via strings.TrimSpace — keep import alive.
-var _ = strings.TrimSpace

@@ -1,7 +1,6 @@
 package trader
 
 import (
-	"log"
 	"time"
 )
 
@@ -48,9 +47,6 @@ func (s *NearExpiryStrategy) Evaluate(snap Snapshot) *TradeSignal {
 	if price > 0.99 {
 		price = 0.99
 	}
-
-	log.Printf("[strategy/%s] signal BUY %s @ %.4f edge=%+.4f tte=%.0fs size=%.2f USDC",
-		s.params.Name, snap.TokenID[:min(8, len(snap.TokenID))], price, snap.Edge, tte.Seconds(), size)
 
 	return &TradeSignal{
 		TokenID:  snap.TokenID,

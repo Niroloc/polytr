@@ -1,7 +1,6 @@
 package trader
 
 import (
-	"log"
 	"time"
 )
 
@@ -54,9 +53,6 @@ func (s *StraddleStrategy) EvaluateBatch(snaps []Snapshot) []*TradeSignal {
 		if size < s.params.MinSizeUSDC {
 			continue
 		}
-
-		log.Printf("[strategy/%s] %s ask=%.4f fair=%.4f edge=%+.4f size=%.2f USDC",
-			s.params.Name, snap.Outcome, snap.BestAsk, snap.FairPrice, edge, size)
 
 		signals = append(signals, &TradeSignal{
 			TokenID:  snap.TokenID,
